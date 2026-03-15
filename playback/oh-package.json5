@@ -1,0 +1,12 @@
+{
+  "name": "playback",
+  "version": "1.0.0",
+  "description": "Playback engine: AVPlayer, media session, sleep timer",
+  "main": "src/main/ets/index.ets",
+  "author": "",
+  "license": "",
+  "dependencies": {
+    "common": "file:../common",
+    "datastore": "file:../datastore"
+  }
+}

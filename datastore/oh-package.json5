@@ -1,0 +1,11 @@
+{
+  "name": "datastore",
+  "version": "1.0.0",
+  "description": "Data persistence: database, preferences",
+  "main": "src/main/ets/index.ets",
+  "author": "",
+  "license": "",
+  "dependencies": {
+    "common": "file:../common"
+  }
+}

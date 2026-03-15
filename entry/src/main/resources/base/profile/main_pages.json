@@ -1,0 +1,14 @@
+{
+  "src": [
+    "pages/Index",
+    "pages/EpisodeListPage",
+    "pages/EpisodeDetailPage",
+    "pages/AddFeedPage",
+    "pages/FullPlayerPage",
+    "pages/DownloadsPage",
+    "pages/HistoryPage",
+    "pages/StatisticsPage",
+    "pages/SettingsPage",
+    "pages/SearchPage"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "common",
+  "version": "1.0.0",
+  "description": "Shared foundation: data models, events, utilities",
+  "main": "src/main/ets/index.ets",
+  "author": "",
+  "license": "",
+  "dependencies": {}
+}

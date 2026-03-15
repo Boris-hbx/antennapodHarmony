@@ -1,0 +1,104 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\huai\\.ohos\\config\\default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001A858A3B742CF637A5A4C6936A4475F9891621A2BCF9761979E11557CF4699C3C0BF269D9B6D19",
+          "profile": "C:\\Users\\huai\\.ohos\\config\\default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\huai\\.ohos\\config\\default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.p12",
+          "storePassword": "0000001A03680E98300EE6A21B180E872F077EBCA940375566C501E9ECEA4EA8527110C1122C2A990586"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "targetSdkVersion": "6.0.1(21)",
+        "compatibleSdkVersion": "6.0.0(20)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug",
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "common",
+      "srcPath": "./common",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "datastore",
+      "srcPath": "./datastore",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "network",
+      "srcPath": "./network",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "playback",
+      "srcPath": "./playback",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Data persistence module: database and preferences"
+    }
+  ]
+}

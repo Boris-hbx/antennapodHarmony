@@ -1,0 +1,12 @@
+{
+  "name": "network",
+  "version": "1.0.0",
+  "description": "Networking: HTTP client, RSS parsing, download",
+  "main": "src/main/ets/index.ets",
+  "author": "",
+  "license": "",
+  "dependencies": {
+    "common": "file:../common",
+    "datastore": "file:../datastore"
+  }
+}
