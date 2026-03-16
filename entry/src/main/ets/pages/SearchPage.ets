@@ -1,9 +1,11 @@
-﻿import { router } from '@kit.ArkUI';
-import { Feed, FeedItem } from 'common';
-import { searchFeeds, searchFeedItems } from 'datastore';
+import { router, promptAction } from '@kit.ArkUI';
+import { Feed, FeedItem, EventBus, FEED_LIST_UPDATE } from 'common';
+import type { FeedListUpdateData } from 'common';
+import { searchFeeds, searchFeedItems, getFeedItemList, addOrUpdateFeed } from 'datastore';
 
 /**
  * 本地搜索页 — 搜索已订阅的 Feed 和单集
+ * Task-023: 播客结果点击 → 底部弹窗预览（而非全屏跳转）
  */
 @Entry
 @Component
@@ -13,6 +15,12 @@ struct SearchPage {
   @State itemResults: FeedItem[] = [];
   @State isSearching: boolean = false;
   @State hasSearched: boolean = false;
+
+  // Task-023: 底部弹窗预览状态
+  @State showFeedPreview: boolean = false;
+  @State previewFeed: Feed | null = null;
+  @State previewEpisodes: FeedItem[] = [];
+  @State descExpanded: boolean = false;
 
   async doSearch(): Promise<void> {
     if (this.query.trim().length === 0) return;
@@ -137,11 +145,16 @@ struct SearchPage {
                 }
                 .width('100%')
                 .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-                .onClick(() => {
-                  router.pushUrl({
-                    url: 'pages/EpisodeListPage',
-                    params: { feedId: feed.id, feedTitle: feed.getTitle() }
-                  });
+                .onClick(async () => {
+                  // Task-023: 改为弹窗预览
+                  this.previewFeed = feed;
+                  this.descExpanded = false;
+                  try {
+                    this.previewEpisodes = await getFeedItemList(feed.id, null, null, 0, 3);
+                  } catch (_e) {
+                    this.previewEpisodes = [];
+                  }
+                  this.showFeedPreview = true;
                 })
               }
             }, (feed: Feed) => feed.id.toString())
@@ -214,6 +227,149 @@ struct SearchPage {
     }
     .width('100%')
     .height('100%')
+    // Task-023: 播客预览弹窗
+    .bindSheet($$this.showFeedPreview, () => { this.FeedPreviewSheet(); }, {
+      detents: [SheetSize.MEDIUM, SheetSize.LARGE],
+      showClose: false,
+      dragBar: true
+    })
+  }
+
+  // ===== Task-023: 播客预览底部弹窗 =====
+
+  @Builder
+  FeedPreviewSheet() {
+    Column() {
+      // 顶栏：× 关闭
+      Row() {
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.xmark'))
+            .fontSize(20)
+            .fontColor(['#333333'])
+        }
+        .width(40).height(40)
+        .onClick(() => { this.showFeedPreview = false; })
+
+        Blank()
+      }
+      .width('100%')
+      .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+
+      // 封面 + 标题/作者
+      Row({ space: 12 }) {
+        if (this.previewFeed !== null && (this.previewFeed!.imageUrl ?? '').length > 0) {
+          Image(this.previewFeed!.imageUrl!)
+            .width(88)
+            .height(88)
+            .borderRadius(8)
+            .objectFit(ImageFit.Cover)
+        } else {
+          Column() {
+            Text('🎙️').fontSize(28)
+          }
+          .width(88)
+          .height(88)
+          .borderRadius(8)
+          .backgroundColor('#F0F0F0')
+          .justifyContent(FlexAlign.Center)
+        }
+
+        Column() {
+          Text(this.previewFeed?.getTitle() ?? '')
+            .fontSize(16)
+            .fontWeight(FontWeight.Bold)
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+          Text(this.previewFeed?.author ?? '')
+            .fontSize(14)
+            .fontColor('#444444')
+            .margin({ top: 4 })
+            .maxLines(1)
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Start)
+      }
+      .width('100%')
+      .padding({ left: 16, right: 16, bottom: 12 })
+
+      // 查看全部单集按钮
+      Button('查看全部单集')
+        .width('90%')
+        .height(40)
+        .backgroundColor('#0078C2')
+        .fontColor('#FFFFFF')
+        .fontSize(14)
+        .borderRadius(8)
+        .onClick(() => {
+          this.showFeedPreview = false;
+          if (this.previewFeed !== null) {
+            router.pushUrl({
+              url: 'pages/EpisodeListPage',
+              params: { feedId: this.previewFeed!.id, feedTitle: this.previewFeed!.getTitle() }
+            });
+          }
+        })
+
+      // 描述
+      if (this.previewFeed !== null && (this.previewFeed!.description ?? '').length > 0) {
+        Text(this.stripHtml(this.previewFeed!.description ?? ''))
+          .fontSize(14)
+          .fontColor('#444444')
+          .maxLines(this.descExpanded ? 100 : 3)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .padding({ left: 16, right: 16, top: 12 })
+          .onClick(() => { this.descExpanded = !this.descExpanded; })
+      }
+
+      // 单集预览
+      if (this.previewEpisodes.length > 0) {
+        Divider()
+          .strokeWidth(0.5)
+          .color('#E8E8E8')
+          .margin({ top: 12, bottom: 4 })
+
+        Text('最新单集')
+          .fontSize(13)
+          .fontColor('#888888')
+          .padding({ left: 16, top: 8, bottom: 4 })
+
+        ForEach(this.previewEpisodes, (ep: FeedItem) => {
+          Row() {
+            Column() {
+              Text(ep.title ?? '')
+                .fontSize(14)
+                .maxLines(1)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+              Text(this.formatDate(ep.pubDate))
+                .fontSize(12)
+                .fontColor('#888888')
+                .margin({ top: 2 })
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+          }
+          .width('100%')
+          .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+        }, (ep: FeedItem) => ep.id.toString())
+      }
+
+      Blank().height(20)
+    }
+    .width('100%')
+  }
+
+  // ===== 工具方法 =====
+
+  stripHtml(html: string): string {
+    return html.replace(/<[^>]*>/g, '').replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+      .replace(/&nbsp;/g, ' ').trim();
+  }
+
+  formatDate(date: Date | null): string {
+    if (date === null) return '';
+    return `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`;
   }
 
   formatDuration(ms: number): string {

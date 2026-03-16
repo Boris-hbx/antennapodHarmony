@@ -373,3 +373,34 @@ export async function setSleepTimerAutoEnableTo(hour: number): Promise<void> {
   prefs.putSync('AutoEnableTo', hour);
   await prefs.flush();
 }
+
+// ===== 6.6 首页 Section 排序 =====
+
+const DEFAULT_SECTION_ORDER = '["queue","surprise","inbox","subscriptions","downloads"]';
+
+export function getHomeSectionOrder(): string[] {
+  const json = getDefault().getSync('prefHomeSectionOrder', DEFAULT_SECTION_ORDER) as string;
+  try {
+    return JSON.parse(json) as string[];
+  } catch {
+    return JSON.parse(DEFAULT_SECTION_ORDER) as string[];
+  }
+}
+
+export async function setHomeSectionOrder(order: string[]): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefHomeSectionOrder', JSON.stringify(order));
+  await prefs.flush();
+}
+
+// ===== 6.7 队列锁定 =====
+
+export function isQueueLocked(): boolean {
+  return getDefault().getSync('prefQueueLocked', false) as boolean;
+}
+
+export async function setQueueLocked(locked: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefQueueLocked', locked);
+  await prefs.flush();
+}

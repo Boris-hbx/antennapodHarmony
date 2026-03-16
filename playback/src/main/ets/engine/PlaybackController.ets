@@ -34,6 +34,7 @@ export class PlaybackController {
   private positionSaveTimer: number = -1;
   private pausedAt: number = 0; // 暂停时间戳，用于暂停回退
   private transientPause: boolean = false; // 音频焦点打断标记
+  private isSkipping: boolean = false; // BUG-5: 防止并发 skip
   private sleepTimer: SleepTimer = new SleepTimer();
 
   /**
@@ -45,24 +46,7 @@ export class PlaybackController {
     await initSession(context);
 
     // 设置引擎回调
-    this.engine.onStatusChange = (status: PlayerStatus) => {
-      this.handleStatusChange(status);
-    };
-    this.engine.onPositionUpdate = (posMs: number, durMs: number) => {
-      EventBus.emit<PlaybackPositionData>(PLAYBACK_POSITION, {
-        position: posMs, duration: durMs
-      });
-      // 智能标记已播（需求 10）
-      if (shouldSmartMarkAsPlayed(posMs, durMs)) {
-        this.handleCompletion();
-      }
-    };
-    this.engine.onCompletion = () => {
-      this.handleCompletion();
-    };
-    this.engine.onError = (error: string) => {
-      console.error('Playback error: ' + error);
-    };
+    this.registerEngineCallbacks();
 
     // 睡眠定时器到时回调
     this.sleepTimer.onTimerEnd = () => {
@@ -132,10 +116,25 @@ export class PlaybackController {
     }
     const fallbackUrl = media.downloadUrl ?? '';
     console.info('PlaybackController: playMedia url=' + url.substring(0, 80) + ' isLocal=' + isLocal);
-    await this.engine.setDataSource(url, isLocal, fallbackUrl);
 
-    // 准备
-    await this.engine.prepare();
+    // BUG-5 修复：AVPlayer 状态转换可能超时或失败，包裹 try-catch 防止卡死
+    try {
+      await this.engine.setDataSource(url, isLocal, fallbackUrl);
+      await this.engine.prepare();
+    } catch (e) {
+      console.error('PlaybackController: setDataSource/prepare failed: ' + (e instanceof Error ? e.message : JSON.stringify(e)));
+      // 尝试重建 AVPlayer 后重试一次
+      try {
+        await this.engine.release();
+        await this.engine.init();
+        this.registerEngineCallbacks();
+        await this.engine.setDataSource(url, isLocal, fallbackUrl);
+        await this.engine.prepare();
+      } catch (retryError) {
+        console.error('PlaybackController: retry also failed: ' + (retryError instanceof Error ? retryError.message : JSON.stringify(retryError)));
+        return; // 放弃播放，不卡死 UI
+      }
+    }
 
     // 跳过片头
     if (this.currentFeed?.preferences !== null && this.currentFeed?.preferences !== undefined) {
@@ -214,23 +213,44 @@ export class PlaybackController {
 
   /**
    * 跳到队列下一个
+   * BUG-5 修复：
+   *  - isSkipping 防并发（连按不会同时操作 AVPlayer）
+   *  - 未下载 → stream = true（避免 fdSrc 拿到损坏/不存在的本地文件）
+   *  - try-catch 全包裹 + safeStopPlayback 兜底
    */
   async skip(): Promise<void> {
-    // 只有播放超过 1 秒后才允许跳过
-    if (this.engine.getPosition() < 1000 && this.engine.getStatus() === PlayerStatus.PLAYING) {
-      return;
-    }
+    // 防止并发：skip 进行中直接忽略
+    if (this.isSkipping) return;
+    this.isSkipping = true;
 
-    if (this.currentItem === null) {
-      this.stopPlayback();
-      return;
-    }
+    try {
+      if (this.currentItem === null) {
+        await this.safeStopPlayback();
+        return;
+      }
 
-    const next = await getNextInQueue(this.currentItem);
-    if (next !== null && next.media !== null) {
-      await this.playMedia(next.media, next.feedId, false);
-    } else {
-      await this.stopPlayback();
+      const next = await getNextInQueue(this.currentItem);
+      if (next === null || next.media === null) {
+        await this.safeStopPlayback();
+        return;
+      }
+
+      // 判断下一集是否已下载：没有本地文件 → stream 模式
+      const hasLocalFile = next.media.localFileUrl !== null
+        && next.media.localFileUrl.length > 0;
+      const shouldStream = !hasLocalFile;
+
+      // 先停止当前播放，让 AVPlayer 回到干净状态
+      await this.safeStopPlayback();
+
+      // 播放下一集
+      await this.playMedia(next.media, next.feedId, shouldStream);
+    } catch (e) {
+      console.error('PlaybackController.skip() failed: ' +
+        (e instanceof Error ? e.message : JSON.stringify(e)));
+      await this.safeStopPlayback();
+    } finally {
+      this.isSkipping = false;
     }
   }
 
@@ -313,6 +333,26 @@ export class PlaybackController {
    */
   // ===== 内部方法 =====
 
+  private registerEngineCallbacks(): void {
+    this.engine.onStatusChange = (status: PlayerStatus) => {
+      this.handleStatusChange(status);
+    };
+    this.engine.onPositionUpdate = (posMs: number, durMs: number) => {
+      EventBus.emit<PlaybackPositionData>(PLAYBACK_POSITION, {
+        position: posMs, duration: durMs
+      });
+      if (shouldSmartMarkAsPlayed(posMs, durMs)) {
+        this.handleCompletion();
+      }
+    };
+    this.engine.onCompletion = () => {
+      this.handleCompletion();
+    };
+    this.engine.onError = (error: string) => {
+      console.error('Playback error: ' + error);
+    };
+  }
+
   private async stopPlayback(): Promise<void> {
     this.stopPositionSaveTimer();
     await this.savePosition();
@@ -323,6 +363,23 @@ export class PlaybackController {
     await writeNoMediaPlaying();
     if (this.context !== null) {
       await stopBackgroundPlayback(this.context);
+    }
+  }
+
+  /**
+   * 安全停止：即使 engine.stop() 抛异常也不会传播（BUG-5 修复）
+   */
+  private async safeStopPlayback(): Promise<void> {
+    try {
+      await this.stopPlayback();
+    } catch (e) {
+      console.error('safeStopPlayback error: ' + (e instanceof Error ? e.message : JSON.stringify(e)));
+      // 强制清理状态，即使 stop 失败
+      this.stopPositionSaveTimer();
+      this.currentMedia = null;
+      this.currentItem = null;
+      this.currentFeed = null;
+      try { await writeNoMediaPlaying(); } catch (_) { /* ignore */ }
     }
   }
 
@@ -352,9 +409,17 @@ export class PlaybackController {
       return;
     }
 
-    // 继续播放下一集
+    // 继续播放下一集 — 和 skip() 同样逻辑：未下载用 stream 模式
     if (result.shouldPlayNext && result.nextItem !== null && result.nextItem.media !== null) {
-      await this.playMedia(result.nextItem.media, result.nextItem.feedId, false);
+      const nextMedia = result.nextItem.media;
+      const hasLocal = nextMedia.localFileUrl !== null && nextMedia.localFileUrl.length > 0;
+      try {
+        await this.playMedia(nextMedia, result.nextItem.feedId, !hasLocal);
+      } catch (e) {
+        console.error('handleCompletion: playNext failed: ' +
+          (e instanceof Error ? e.message : JSON.stringify(e)));
+        await this.safeStopPlayback();
+      }
     } else {
       await this.stopPlayback();
     }

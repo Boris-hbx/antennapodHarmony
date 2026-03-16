@@ -65,7 +65,9 @@ export {
   isSleepTimerShakeToReset, setSleepTimerShakeToReset,
   isSleepTimerAutoEnable, setSleepTimerAutoEnable,
   getSleepTimerAutoEnableFrom, setSleepTimerAutoEnableFrom,
-  getSleepTimerAutoEnableTo, setSleepTimerAutoEnableTo
+  getSleepTimerAutoEnableTo, setSleepTimerAutoEnableTo,
+  getHomeSectionOrder, setHomeSectionOrder,
+  isQueueLocked, setQueueLocked
 } from './preferences/UserPreferences';
 
 // 偏好设置 — PlaybackPreferences

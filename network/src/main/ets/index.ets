@@ -46,6 +46,6 @@ export { runStorageCleanup } from './download/StorageCleaner';
 // 后台下载
 export { startBackgroundDownload, stopBackgroundDownloadIfIdle } from './download/BackgroundDownload';
 
-// 播客搜索
-export { searchPodcasts } from './discovery/ItunesSearcher';
+// 播客搜索 & 发现
+export { searchPodcasts, getTopPodcasts } from './discovery/ItunesSearcher';
 export type { ItunesResult } from './discovery/ItunesSearcher';

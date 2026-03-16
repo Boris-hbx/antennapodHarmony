@@ -7,17 +7,21 @@ import { PlayerStatus } from './PlayerStatus';
  *
  * 封装 @ohos.multimedia.media.AVPlayer，提供统一的播放引擎接口。
  * 关键：AVPlayer 的状态变化通过回调异步通知，操作前必须等待正确状态。
+ *
+ * BUG-5 修复：所有 AVPlayer 系统 API 调用都用 raceTimeout 包裹，
+ * 防止 Promise 永不 resolve 导致 UI 线程卡死。
  */
 export class AVPlayerWrapper {
   private player: media.AVPlayer | null = null;
   private status: PlayerStatus = PlayerStatus.STOPPED;
   private currentSpeed: number = 1.0;
   private currentVolume: number = 1.0;
-  private localFd: number = -1; // 本地文件 fd，播放完需关闭
+  private localFd: number = -1;
 
   // 状态等待 Promise resolver
   private stateResolve: (() => void) | null = null;
   private waitingForState: string = '';
+  private stateReject: ((reason: Error) => void) | null = null;
 
   // 回调
   onStatusChange: (status: PlayerStatus) => void = () => {};
@@ -35,10 +39,15 @@ export class AVPlayerWrapper {
 
   async release(): Promise<void> {
     if (this.player !== null) {
-      await this.player.release();
+      try {
+        await this.raceTimeout(this.player.release(), 5000, 'release');
+      } catch (_e) {
+        console.error('AVPlayerWrapper: release failed, forcing null');
+      }
       this.player = null;
     }
     this.closeLocalFd();
+    this.cancelWait('released');
     this.setStatus(PlayerStatus.STOPPED);
   }
 
@@ -47,42 +56,55 @@ export class AVPlayerWrapper {
   async setDataSource(url: string, isLocal: boolean, fallbackUrl?: string): Promise<void> {
     if (this.player === null) return;
 
-    // 关闭之前的本地文件 fd
     this.closeLocalFd();
 
-    // 重置到 idle 状态并等待
-    await this.player.reset();
-    await this.waitForState('idle');
+    // 重置到 idle 状态
+    await this.safeReset();
 
     // 设置数据源（AVPlayer 自动转为 initialized 状态）
+    const initPromise = this.waitForState('initialized');
     let usedLocal = false;
     if (isLocal) {
       try {
-        // 本地文件用 fdSrc，player.url 只支持 http(s)
-        const file = fileIo.openSync(url, fileIo.OpenMode.READ_ONLY);
-        this.localFd = file.fd;
-        const stat = fileIo.statSync(url);
-        console.info('AVPlayerWrapper: fdSrc fd=' + file.fd + ' size=' + stat.size + ' path=' + url);
-        this.player.fdSrc = { fd: file.fd, offset: 0, length: stat.size };
-        usedLocal = true;
+        // 先验证文件存在且可读
+        const exists = fileIo.accessSync(url);
+        if (exists) {
+          const file = fileIo.openSync(url, fileIo.OpenMode.READ_ONLY);
+          this.localFd = file.fd;
+          const stat = fileIo.statSync(url);
+          if (stat.size > 0) {
+            console.info('AVPlayerWrapper: fdSrc fd=' + file.fd + ' size=' + stat.size);
+            this.player.fdSrc = { fd: file.fd, offset: 0, length: stat.size };
+            usedLocal = true;
+          } else {
+            console.error('AVPlayerWrapper: local file is empty, falling back to stream');
+            this.closeLocalFd();
+          }
+        } else {
+          console.error('AVPlayerWrapper: local file not accessible, falling back to stream');
+        }
       } catch (e) {
-        console.error('AVPlayerWrapper: local file failed, falling back to stream: ' + JSON.stringify(e));
+        console.error('AVPlayerWrapper: local file failed: ' + JSON.stringify(e));
         this.closeLocalFd();
       }
     }
     if (!usedLocal) {
-      // 网络 URL 或本地降级
       const streamUrl = fallbackUrl !== undefined && fallbackUrl.length > 0 ? fallbackUrl : url;
+      if (streamUrl.length === 0) {
+        this.cancelWait('no URL');
+        throw new Error('No URL available for playback');
+      }
       console.info('AVPlayerWrapper: streaming url=' + streamUrl.substring(0, 80));
       this.player.url = streamUrl;
     }
-    await this.waitForState('initialized');
+    await initPromise;
   }
 
   async prepare(): Promise<void> {
     if (this.player === null) return;
-    await this.player.prepare();
-    await this.waitForState('prepared');
+    const preparedPromise = this.waitForState('prepared');
+    await this.raceTimeout(this.player.prepare(), 10000, 'prepare');
+    await preparedPromise;
   }
 
   // ===== 播放控制 =====
@@ -94,12 +116,18 @@ export class AVPlayerWrapper {
 
   pause(): void {
     if (this.player === null) return;
-    this.player.pause();
+    const state = this.player.state;
+    if (state === 'playing') {
+      this.player.pause();
+    }
   }
 
   stop(): void {
     if (this.player === null) return;
-    this.player.stop();
+    const state = this.player.state;
+    if (state === 'playing' || state === 'paused' || state === 'prepared') {
+      this.player.stop();
+    }
   }
 
   seekTo(positionMs: number): void {
@@ -154,20 +182,83 @@ export class AVPlayerWrapper {
   }
 
   /**
-   * 等待 AVPlayer 进入指定状态（超时 5 秒）
+   * 安全 reset：给 player.reset() 加超时，防止 Promise 永不 resolve 导致卡死
+   */
+  private async safeReset(): Promise<void> {
+    if (this.player === null) return;
+
+    // 如果已经是 idle，无需 reset
+    if (this.player.state === 'idle') return;
+
+    const idlePromise = this.waitForState('idle');
+    try {
+      await this.raceTimeout(this.player.reset(), 5000, 'reset');
+    } catch (e) {
+      console.error('AVPlayerWrapper: reset() timed out or failed, recreating player');
+      this.cancelWait('reset failed');
+      // reset 失败 → 销毁重建 AVPlayer
+      try { this.player.release(); } catch (_) { /* ignore */ }
+      this.player = await media.createAVPlayer();
+      this.registerCallbacks();
+      this.setStatus(PlayerStatus.STOPPED);
+      return; // 新 player 已经是 idle 状态
+    }
+    await idlePromise;
+  }
+
+  /**
+   * 给任意 Promise 加超时上限
+   */
+  private raceTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`AVPlayer ${label} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      promise.then((val: T) => {
+        clearTimeout(timer);
+        resolve(val);
+      }).catch((err: Error) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  /**
+   * 取消正在等待的 state promise（防止内存泄漏）
+   */
+  private cancelWait(reason: string): void {
+    if (this.stateResolve !== null) {
+      const rejector = this.stateReject;
+      this.stateResolve = null;
+      this.stateReject = null;
+      this.waitingForState = '';
+      if (rejector !== null) {
+        rejector(new Error('Wait cancelled: ' + reason));
+      }
+    }
+  }
+
+  /**
+   * 等待 AVPlayer 进入指定状态（超时 10 秒）
    */
   private waitForState(targetState: string): Promise<void> {
-    return new Promise<void>((resolve) => {
+    if (this.player !== null && this.player.state === targetState) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
       this.waitingForState = targetState;
       this.stateResolve = resolve;
-      // 超时保护
+      this.stateReject = reject;
       setTimeout(() => {
         if (this.stateResolve !== null) {
+          const waitedFor = this.waitingForState;
           this.stateResolve = null;
+          this.stateReject = null;
           this.waitingForState = '';
-          resolve(); // 超时也继续，不阻塞
+          reject(new Error(`AVPlayer timeout waiting for state '${waitedFor}', current: ${this.player?.state}`));
         }
-      }, 5000);
+      }, 10000);
     });
   }
 
@@ -196,7 +287,6 @@ export class AVPlayerWrapper {
   private registerCallbacks(): void {
     if (this.player === null) return;
 
-    // 状态变化
     this.player.on('stateChange', (state: string) => {
       switch (state) {
         case 'idle':
@@ -224,32 +314,39 @@ export class AVPlayerWrapper {
           break;
       }
 
-      // 检查是否有等待该状态的 Promise
-      if (this.stateResolve !== null && state === this.waitingForState) {
-        const resolver = this.stateResolve;
-        this.stateResolve = null;
-        this.waitingForState = '';
-        resolver();
+      if (this.stateResolve !== null) {
+        if (state === this.waitingForState) {
+          const resolver = this.stateResolve;
+          this.stateResolve = null;
+          this.stateReject = null;
+          this.waitingForState = '';
+          resolver();
+        } else if (state === 'error') {
+          const rejector = this.stateReject;
+          this.stateResolve = null;
+          this.stateReject = null;
+          const waited = this.waitingForState;
+          this.waitingForState = '';
+          if (rejector !== null) {
+            rejector(new Error(`AVPlayer error while waiting for '${waited}'`));
+          }
+        }
       }
     });
 
-    // 播放进度
     this.player.on('timeUpdate', (timeMs: number) => {
       this.onPositionUpdate(timeMs, this.getDuration());
     });
 
-    // 播放完成
     this.player.on('endOfStream', () => {
       this.onCompletion();
     });
 
-    // 错误
     this.player.on('error', (err: Error) => {
       this.setStatus(PlayerStatus.ERROR);
       this.onError(err.message ?? 'Unknown playback error');
     });
 
-    // 缓冲进度
     this.player.on('bufferingUpdate', (infoType: media.BufferingInfoType, value: number) => {
       if (infoType === media.BufferingInfoType.BUFFERING_PERCENT) {
         this.onBufferingUpdate(value);

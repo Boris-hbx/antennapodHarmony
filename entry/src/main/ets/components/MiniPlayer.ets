@@ -2,6 +2,7 @@
  * 迷你播放器组件（#12.1 — 对照 Android ExternalPlayerFragment 复刻）
  *
  * 64vp 高度，浅蓝灰背景，底部进度条，封面 64x64
+ * 左右滑动 >100vp → dismiss（对标 Android BottomSheet STATE_HIDDEN 行为）
  */
 @Component
 export struct MiniPlayer {
@@ -14,6 +15,12 @@ export struct MiniPlayer {
 
   onPlayPause?: () => void;
   onTap?: () => void;
+  onDismiss?: () => void; // 左右滑动消失回调
+
+  @State swipeOffsetX: number = 0; // 当前拖动偏移量
+
+  // 滑动消失阈值（vp）
+  private readonly DISMISS_THRESHOLD: number = 100;
 
   build() {
     if (this.isVisible) {
@@ -26,8 +33,9 @@ export struct MiniPlayer {
               .objectFit(ImageFit.Contain)
           } else {
             Column() {
-              Text('🎙️')
+              SymbolGlyph($r('sys.symbol.mic'))
                 .fontSize(26)
+                .fontColor(['#666666'])
             }
             .width(64)
             .height(64)
@@ -55,14 +63,13 @@ export struct MiniPlayer {
           .alignItems(HorizontalAlign.Start)
 
           // 播放/暂停按钮 48x48 点击区域
-          Column() {
-            Text(this.isPlaying ? '⏸' : '▶')
+          Stack({ alignContent: Alignment.Center }) {
+            SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
               .fontSize(26)
-              .fontColor('#1A1A1A')
+              .fontColor(['#1A1A1A'])
           }
           .width(48)
           .height(48)
-          .justifyContent(FlexAlign.Center)
           .borderRadius(24)
           .onClick(() => {
             this.onPlayPause?.();
@@ -91,6 +98,26 @@ export struct MiniPlayer {
       .height(64)
       .backgroundColor(Color.Transparent)
       .shadow({ radius: 6, color: '#20000000', offsetY: -2 })
+      // 拖动时水平偏移 + 透明度随距离渐变
+      .translate({ x: this.swipeOffsetX })
+      .opacity(1 - Math.min(Math.abs(this.swipeOffsetX) / this.DISMISS_THRESHOLD, 1) * 0.5)
+      // 左右滑动手势
+      .gesture(
+        PanGesture({ direction: PanDirection.Horizontal })
+          .onActionUpdate((event: GestureEvent) => {
+            this.swipeOffsetX = event.offsetX;
+          })
+          .onActionEnd(() => {
+            if (Math.abs(this.swipeOffsetX) >= this.DISMISS_THRESHOLD) {
+              // 超过阈值 → 触发 dismiss
+              this.swipeOffsetX = 0;
+              this.onDismiss?.();
+            } else {
+              // 未超阈值 → 弹回
+              this.swipeOffsetX = 0;
+            }
+          })
+      )
       .onClick(() => {
         this.onTap?.();
       })

@@ -132,7 +132,8 @@ async function executeDownload(task: DownloadTask, media: FeedMedia): Promise<vo
       method: http.RequestMethod.GET,
       header: headers,
       connectTimeout: 15000,
-      readTimeout: 60000
+      readTimeout: 300000,
+      expectDataType: http.HttpDataType.ARRAY_BUFFER
     });
 
     const statusCode = response.responseCode;

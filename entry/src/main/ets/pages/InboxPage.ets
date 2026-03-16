@@ -95,18 +95,24 @@ export struct InboxPage {
 
       if (this.items.length === 0) {
         Column() {
-          Text('没有新单集')
+          SymbolGlyph($r('sys.symbol.envelope'))
+            .fontSize(56)
+            .fontColor(['#AAAAAA'])
+            .margin({ top: 24, bottom: 16 })
+          Text('收件箱中没有单集')
             .fontSize(18)
             .fontColor('#444444')
-            .margin({ top: 80 })
-          Text('订阅的播客有新单集时会显示在这里')
+          Text('新单集上线后，将在此处显示。\n随后您可以决定是否对其感兴趣。')
             .fontSize(14)
-            .fontColor('#CCC')
+            .fontColor('#888888')
             .margin({ top: 8 })
+            .textAlign(TextAlign.Center)
+            .padding({ left: 40, right: 40 })
         }
         .width('100%')
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Center)
+        .justifyContent(FlexAlign.Center)
       } else {
         List() {
           ForEach(this.items, (item: FeedItem) => {

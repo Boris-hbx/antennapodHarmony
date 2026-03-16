@@ -2,17 +2,21 @@ import { router, promptAction } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { ShareSheet } from '../components/ShareSheet';
 import { getController } from '../entryability/EntryAbility';
-import { EventBus, PLAYBACK_POSITION, PLAYER_STATUS, TAG_FAVORITE } from 'common';
+import { EventBus, PLAYBACK_POSITION, PLAYER_STATUS, TAG_FAVORITE, PlayState } from 'common';
 import type { PlaybackPositionData } from 'common';
 import { SLEEP_TIMER_UPDATE } from 'playback';
 import type { SleepTimerData } from 'playback';
 import {
   getFastForwardSecs, getRewindSecs, getPlaybackSpeed, getPlaybackSpeedArray,
-  addFavoriteItem, removeFavoriteItem, getFeedItem
+  addFavoriteItem, removeFavoriteItem, getFeedItem, markItemPlayed,
+  isSleepTimerAutoEnable, setSleepTimerAutoEnable,
+  getSleepTimerAutoEnableFrom, setSleepTimerAutoEnableFrom,
+  getSleepTimerAutoEnableTo, setSleepTimerAutoEnableTo,
+  deleteFeedMediaOfItem
 } from 'datastore';
 
 /**
- * 全屏播放器页面（#16 PL1-PL9 精确对标 Android AudioPlayerFragment）
+ * 全屏播放器页面 — Task-026: 倍速弹窗 + ⋮ 更多菜单 + 睡眠定时自动启用
  */
 @Entry
 @Component
@@ -24,7 +28,8 @@ struct FullPlayerPage {
   @State durationMs: number = 0;
   @State isPlaying: boolean = false;
   @State currentSpeed: number = 1.0;
-  @State showSpeedPicker: boolean = false;
+  @State showSheet: boolean = false;
+  @State activeSheet: string = '';
   @State showSleepTimer: boolean = false;
   @State sleepTimerLeft: number = 0;
   @State sleepTimerActive: boolean = false;
@@ -38,6 +43,14 @@ struct FullPlayerPage {
   @State itemLink: string = '';
   @State mediaUrl: string = '';
   @State currentItemId: number = 0;
+  @State isBuffering: boolean = false;
+  @State feedId: number = 0;
+
+  // Task-026: 睡眠定时自动启用
+  @State autoSleepEnabled: boolean = false;
+  @State autoSleepStartHour: number = 22;
+  @State autoSleepEndHour: number = 7;
+  // showAutoSleepTimeSheet merged into activeSheet/showSheet
 
   private positionCallback: (data: PlaybackPositionData) => void = (data: PlaybackPositionData) => {
     if (!this.isSeeking) {
@@ -67,9 +80,13 @@ struct FullPlayerPage {
       this.itemLink = params['itemLink'] as string ?? '';
       this.mediaUrl = params['mediaUrl'] as string ?? '';
       this.currentItemId = params['itemId'] as number ?? 0;
+      this.feedId = params['feedId'] as number ?? 0;
     }
     this.currentSpeed = getPlaybackSpeed();
     this.isPlaying = getController().isPlaying();
+    this.autoSleepEnabled = isSleepTimerAutoEnable();
+    this.autoSleepStartHour = getSleepTimerAutoEnableFrom();
+    this.autoSleepEndHour = getSleepTimerAutoEnableTo();
     EventBus.on<PlaybackPositionData>(PLAYBACK_POSITION, this.positionCallback);
     EventBus.on<void>(PLAYER_STATUS, this.statusCallback);
     EventBus.on<SleepTimerData>(SLEEP_TIMER_UPDATE, this.sleepCallback);
@@ -83,50 +100,72 @@ struct FullPlayerPage {
 
   build() {
     Column() {
-      // PL7: 顶栏 56vp + 图标统一用 action_icon_color
+      // 顶栏
       Row() {
-        Text('˅')
-          .fontSize(28)
-          .fontColor('#000000')
-          .width(48).height(56)
-          .textAlign(TextAlign.Center)
-          .onClick(() => { router.back(); })
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.chevron_down'))
+            .fontSize(24)
+            .fontColor(['#000000'])
+        }
+        .width(48).height(56)
+        .onClick(() => { router.back(); })
 
         Blank()
 
-        Text(this.isFavorite ? '★' : '☆')
-          .fontSize(22)
-          .fontColor(this.isFavorite ? '#FFC107' : '#000000')
-          .width(48).height(56)
-          .textAlign(TextAlign.Center)
-          .onClick(() => { this.toggleFavorite(); })
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph(this.isFavorite ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'))
+            .fontSize(24)
+            .fontColor([this.isFavorite ? '#FFC107' : '#000000'])
+        }
+        .width(48).height(56)
+        .onClick(() => { this.toggleFavorite(); })
 
-        Text('zzᶻ')
-          .fontSize(14)
-          .fontColor(this.sleepTimerActive ? '#0078C2' : '#000000')
-          .fontWeight(FontWeight.Bold)
-          .width(48).height(56)
-          .textAlign(TextAlign.Center)
-          .onClick(() => { this.showSleepTimer = !this.showSleepTimer; this.showSpeedPicker = false; })
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.timer'))
+            .fontSize(24)
+            .fontColor([this.sleepTimerActive ? '#0078C2' : '#000000'])
+        }
+        .width(48).height(56)
+        .onClick(() => { this.showSleepTimer = !this.showSleepTimer; })
 
-        Text('↗')
-          .fontSize(20)
-          .fontColor('#000000')
-          .width(48).height(56)
-          .textAlign(TextAlign.Center)
-          .onClick(() => { this.showShareSheet = !this.showShareSheet; this.showSleepTimer = false; this.showSpeedPicker = false; })
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.arrow_up'))
+            .fontSize(24)
+            .fontColor(['#000000'])
+        }
+        .width(48).height(56)
+        .onClick(() => { this.showShareSheet = !this.showShareSheet; this.showSleepTimer = false; })
 
-        Text('⋮')
-          .fontSize(22)
-          .fontColor('#000000')
-          .width(48).height(56)
-          .textAlign(TextAlign.Center)
-          .onClick(() => { this.showSpeedPicker = !this.showSpeedPicker; this.showSleepTimer = false; })
+        // Task-026: ⋮ 更多菜单
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.dot_grid_2x2'))
+            .fontSize(24)
+            .fontColor(['#000000'])
+        }
+        .width(48).height(56)
+        .bindMenu([
+          {
+            value: '标记已播',
+            action: () => { this.togglePlayed(); }
+          },
+          {
+            value: '分享',
+            action: () => { this.showShareSheet = true; }
+          },
+          {
+            value: '跳转播客详情',
+            action: () => { this.goToFeedDetail(); }
+          },
+          {
+            value: '删除本地文件',
+            action: () => { this.confirmDeleteLocal(); }
+          },
+        ])
       }
       .width('100%')
       .height(56)
 
-      // PL4: 封面区 — 水平 margin=32vp
+      // 封面区
       Column() {
         if (this.imageUrl.length > 0) {
           Image(this.imageUrl)
@@ -137,8 +176,9 @@ struct FullPlayerPage {
             .shadow({ radius: 16, color: '#30000000', offsetY: 8 })
         } else {
           Column() {
-            Text('🎙️')
+            SymbolGlyph($r('sys.symbol.mic'))
               .fontSize(80)
+              .fontColor(['#AAAAAA'])
           }
           .width('100%')
           .aspectRatio(1)
@@ -152,7 +192,7 @@ struct FullPlayerPage {
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
 
-      // PL2: 信息区 — 播客名 14fp + 标题 14fp
+      // 信息区
       Column() {
         Text(this.pubDateStr.length > 0 ? `${this.feedTitle} · ${this.pubDateStr}` : this.feedTitle)
           .fontSize(14)
@@ -169,7 +209,6 @@ struct FullPlayerPage {
           .textAlign(TextAlign.Center)
           .margin({ top: 4 })
 
-        // PL3: 单集说明按钮 36vp, 16fp, 最小宽度 150vp
         Button('ⓘ 单集说明')
           .type(ButtonType.Normal)
           .height(36)
@@ -191,8 +230,20 @@ struct FullPlayerPage {
       .padding({ left: 24, right: 24 })
       .alignItems(HorizontalAlign.Center)
 
-      // PL8: 进度条 — selectedColor 用主色，时间用 #444444
+      // 进度条
       Column() {
+        if (this.isSeeking) {
+          Text(this.formatTime(this.seekPosition))
+            .fontSize(16)
+            .fontColor('#FFFFFF')
+            .backgroundColor('#333333')
+            .borderRadius(8)
+            .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+            .margin({ bottom: 4 })
+        } else {
+          Column().height(32)
+        }
+
         Slider({
           value: this.isSeeking ? this.seekPosition : this.positionMs,
           min: 0,
@@ -232,14 +283,15 @@ struct FullPlayerPage {
       }
       .width('100%')
       .padding({ left: 24, right: 24, top: 12 })
+      .alignItems(HorizontalAlign.Center)
 
-      // PL1+PL6: 控制按钮行 — 48vp 按钮, 64vp 播放(透明底无边框), marginBottom=24
+      // 控制按钮行
       Row() {
-        // 倍速 48x48
+        // Task-026: 倍速按钮 — 点击弹出弹窗而非直接循环
         Column() {
-          Text('⏲')
+          SymbolGlyph($r('sys.symbol.timer'))
             .fontSize(22)
-            .fontColor('#000000')
+            .fontColor(['#000000'])
           Text(`${this.currentSpeed.toFixed(2)}`)
             .fontSize(10)
             .fontColor('#444444')
@@ -247,15 +299,15 @@ struct FullPlayerPage {
         }
         .width(48).height(48)
         .justifyContent(FlexAlign.Center)
-        .onClick(() => { this.showSpeedPicker = !this.showSpeedPicker; this.showSleepTimer = false; })
+        .onClick(() => { this.activeSheet = 'speed'; this.showSheet = true; })
 
         Blank()
 
-        // 快退 48x48
+        // 快退
         Column() {
-          Text('◁◁')
+          SymbolGlyph($r('sys.symbol.gobackward_15'))
             .fontSize(24)
-            .fontColor('#000000')
+            .fontColor(['#000000'])
           Text(`${getRewindSecs()}`)
             .fontSize(10)
             .fontColor('#444444')
@@ -265,20 +317,32 @@ struct FullPlayerPage {
         .justifyContent(FlexAlign.Center)
         .onClick(() => { getController().seekDelta(-getRewindSecs() * 1000); })
 
-        // PL1: 播放/暂停 64x64 — 透明底+深色图标, 无边框无阴影
-        Text(this.isPlaying ? '⏸' : '▶')
-          .fontSize(40)
-          .fontColor('#000000')
-          .width(64).height(64)
-          .textAlign(TextAlign.Center)
-          .margin({ left: 12, right: 12 })
-          .onClick(() => { getController().playPause(); })
+        // 播放/暂停
+        Stack() {
+          Progress({ value: 0, total: 100, type: ProgressType.Ring })
+            .width(64)
+            .height(64)
+            .color('#0078C2')
+            .backgroundColor('transparent')
+            .style({ strokeWidth: 3 })
+            .visibility(this.isBuffering ? Visibility.Visible : Visibility.Hidden)
+          SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
+            .fontSize(32)
+            .fontColor(['#000000'])
+        }
+        .width(64).height(64)
+        .borderRadius(32)
+        .borderWidth(2)
+        .borderColor('#000000')
+        .backgroundColor(Color.White)
+        .margin({ left: 12, right: 12 })
+        .onClick(() => { getController().playPause(); })
 
-        // 快进 48x48
+        // 快进
         Column() {
-          Text('▷▷')
+          SymbolGlyph($r('sys.symbol.goforward_30'))
             .fontSize(24)
-            .fontColor('#000000')
+            .fontColor(['#000000'])
           Text(`${getFastForwardSecs()}`)
             .fontSize(10)
             .fontColor('#444444')
@@ -290,39 +354,18 @@ struct FullPlayerPage {
 
         Blank()
 
-        // 跳过 48x48
-        Text('⏭')
-          .fontSize(22)
-          .fontColor('#000000')
-          .width(48).height(48)
-          .textAlign(TextAlign.Center)
-          .onClick(() => { getController().skip(); })
+        // 下一集
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.forward_end_fill'))
+            .fontSize(22)
+            .fontColor(['#000000'])
+        }
+        .width(48).height(48)
+        .onClick(() => { getController().skip(); })
       }
       .width('100%')
       .padding({ left: 20, right: 20, top: 8 })
       .margin({ bottom: 24 })
-
-      // 倍速选择器
-      if (this.showSpeedPicker) {
-        Row() {
-          ForEach(getPlaybackSpeedArray(), (speed: number) => {
-            Text(`${speed.toFixed(1)}x`)
-              .fontSize(14)
-              .fontColor(Math.abs(this.currentSpeed - speed) < 0.01 ? '#0078C2' : '#444444')
-              .fontWeight(Math.abs(this.currentSpeed - speed) < 0.01 ? FontWeight.Bold : FontWeight.Normal)
-              .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-              .onClick(() => {
-                this.currentSpeed = speed;
-                getController().setSpeed(speed);
-                this.showSpeedPicker = false;
-              })
-          }, (speed: number) => speed.toString())
-        }
-        .width('100%')
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor('#F5F7FA')
-        .padding(8)
-      }
 
       // 睡眠定时器
       if (this.showSleepTimer) {
@@ -379,6 +422,31 @@ struct FullPlayerPage {
             }
             .margin({ top: 12 })
           }
+
+          // Task-026: 自动启用时间范围
+          Divider().margin({ top: 16, bottom: 12 })
+          Row() {
+            Text('自动启用').fontSize(14).layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: this.autoSleepEnabled })
+              .onChange((isOn: boolean) => {
+                this.autoSleepEnabled = isOn;
+                setSleepTimerAutoEnable(isOn);
+              })
+          }
+          .width('90%')
+          .padding({ top: 4, bottom: 4 })
+
+          if (this.autoSleepEnabled) {
+            Row() {
+              Text('时间范围').fontSize(14).fontColor('#666666').layoutWeight(1)
+              Text(`${this.padHour(this.autoSleepStartHour)}:00 - ${this.padHour(this.autoSleepEndHour)}:00`)
+                .fontSize(14)
+                .fontColor('#0078C2')
+                .onClick(() => { this.activeSheet = 'autoSleep'; this.showSheet = true; })
+            }
+            .width('90%')
+            .padding({ top: 4, bottom: 8 })
+          }
         }
         .width('100%').padding(16).backgroundColor('#F5F7FA').alignItems(HorizontalAlign.Center)
       }
@@ -401,8 +469,86 @@ struct FullPlayerPage {
     .width('100%')
     .height('100%')
     .backgroundColor('#F9FCFF')
+    // 统一 bindSheet — ArkUI 一个组件只能绑一个 bindSheet
+    .bindSheet($$this.showSheet, () => { this.SheetDispatcher(); }, { detents: [SheetSize.FIT_CONTENT], showClose: true, dragBar: true })
   }
 
+  // ===== 弹窗统一分发 =====
+  @Builder SheetDispatcher() {
+    if (this.activeSheet === 'speed') {
+      this.SpeedSheetBuilder()
+    } else if (this.activeSheet === 'autoSleep') {
+      this.AutoSleepTimeSheetBuilder()
+    }
+  }
+
+  // ===== Task-026: 倍速选择弹窗（6 档固定速度）=====
+  @Builder SpeedSheetBuilder() {
+    Column() {
+      Text('播放速度').fontSize(18).fontWeight(FontWeight.Bold).padding(16)
+
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center }) {
+        ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], (speed: number) => {
+          Button(`${speed}x`)
+            .width(88).height(40).margin(6)
+            .type(ButtonType.Normal)
+            .borderRadius(20)
+            .backgroundColor(Math.abs(this.currentSpeed - speed) < 0.01 ? '#0078C2' : '#F0F0F0')
+            .fontColor(Math.abs(this.currentSpeed - speed) < 0.01 ? '#FFFFFF' : '#333333')
+            .fontSize(15)
+            .onClick(() => {
+              this.currentSpeed = speed;
+              getController().setSpeed(speed);
+              this.showSheet = false;
+            })
+        }, (speed: number) => speed.toString())
+      }.padding(16)
+
+      Text('注：受平台限制，仅支持以上 6 档速度')
+        .fontSize(12).fontColor('#888888').padding({ left: 16, bottom: 16 })
+    }
+  }
+
+  // ===== Task-026: 自动启用时间范围弹窗 =====
+  @Builder AutoSleepTimeSheetBuilder() {
+    Column() {
+      Text('设置自动启用时间范围').fontSize(16).fontWeight(FontWeight.Bold).padding(16)
+
+      Row() {
+        Text('开始时间').fontSize(14).width(80)
+        Counter() {
+          Text(`${this.padHour(this.autoSleepStartHour)}:00`).fontSize(16)
+        }
+        .onInc(() => { this.autoSleepStartHour = (this.autoSleepStartHour + 1) % 24; })
+        .onDec(() => { this.autoSleepStartHour = (this.autoSleepStartHour + 23) % 24; })
+      }
+      .width('90%')
+      .padding({ top: 12, bottom: 8 })
+
+      Row() {
+        Text('结束时间').fontSize(14).width(80)
+        Counter() {
+          Text(`${this.padHour(this.autoSleepEndHour)}:00`).fontSize(16)
+        }
+        .onInc(() => { this.autoSleepEndHour = (this.autoSleepEndHour + 1) % 24; })
+        .onDec(() => { this.autoSleepEndHour = (this.autoSleepEndHour + 23) % 24; })
+      }
+      .width('90%')
+      .padding({ top: 8, bottom: 16 })
+
+      Button('确定')
+        .width('80%').height(40).fontSize(15)
+        .fontColor('#FFFFFF').backgroundColor('#0078C2').borderRadius(20)
+        .margin({ bottom: 16 })
+        .onClick(async () => {
+          await setSleepTimerAutoEnableFrom(this.autoSleepStartHour);
+          await setSleepTimerAutoEnableTo(this.autoSleepEndHour);
+          this.showSheet = false;
+        })
+    }
+  }
+
+  // ===== 操作方法 =====
   async toggleFavorite(): Promise<void> {
     if (this.currentItemId <= 0) return;
     try {
@@ -420,6 +566,47 @@ struct FullPlayerPage {
     } catch (_e) { /* ignore */ }
   }
 
+  async togglePlayed(): Promise<void> {
+    if (this.currentItemId <= 0) return;
+    try {
+      const item = await getFeedItem(this.currentItemId);
+      if (item === null) return;
+      const newState = item.isPlayed() ? PlayState.UNPLAYED : PlayState.PLAYED;
+      await markItemPlayed(this.currentItemId, newState);
+      const msg = newState === PlayState.PLAYED ? '已标记为已播' : '已标记为未播';
+      promptAction.showToast({ message: msg, duration: 1500 });
+    } catch (_e) { /* ignore */ }
+  }
+
+  goToFeedDetail(): void {
+    if (this.feedId > 0) {
+      router.pushUrl({
+        url: 'pages/EpisodeListPage',
+        params: { feedId: this.feedId, feedTitle: this.feedTitle }
+      });
+    }
+  }
+
+  confirmDeleteLocal(): void {
+    if (this.currentItemId <= 0) return;
+    AlertDialog.show({
+      title: '删除本地文件',
+      message: '确定要删除此单集的本地文件吗？',
+      primaryButton: {
+        value: '取消',
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '删除',
+        fontColor: '#F44336',
+        action: async () => {
+          await deleteFeedMediaOfItem(this.currentItemId);
+          promptAction.showToast({ message: '已删除本地文件', duration: 1500 });
+        }
+      }
+    });
+  }
+
   shareEpisode(): void {
     const shareText = `${this.feedTitle}: ${this.title}\n${this.itemLink}`;
     try {
@@ -430,6 +617,10 @@ struct FullPlayerPage {
     } catch (_e) {
       promptAction.showToast({ message: '复制失败', duration: 1500 });
     }
+  }
+
+  padHour(h: number): string {
+    return h < 10 ? `0${h}` : `${h}`;
   }
 
   formatTime(ms: number): string {

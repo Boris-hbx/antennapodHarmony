@@ -35,6 +35,13 @@ export struct MorePage {
         })
 
         ListItem() {
+          this.menuItemText('标签管理', '查看、重命名、删除全局标签')
+        }
+        .onClick(() => {
+          router.pushUrl({ url: 'pages/TagManagementPage' });
+        })
+
+        ListItem() {
           this.menuItem($r('app.string.title_settings'), $r('app.string.desc_app_settings'))
         }
         .onClick(() => {
@@ -52,6 +59,22 @@ export struct MorePage {
 
   @Builder
   menuItem(title: string | Resource, subtitle: string | Resource) {
+    Column() {
+      Text(title)
+        .fontSize(16)
+        .fontWeight(FontWeight.Medium)
+      Text(subtitle)
+        .fontSize(12)
+        .fontColor('#444444')
+        .margin({ top: 2 })
+    }
+    .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  menuItemText(title: string, subtitle: string) {
     Column() {
       Text(title)
         .fontSize(16)

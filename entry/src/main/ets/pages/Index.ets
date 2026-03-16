@@ -6,12 +6,15 @@ import { InboxPage } from './InboxPage';
 import { QueuePage } from './QueuePage';
 import { MorePage } from './MorePage';
 import { MiniPlayer } from '../components/MiniPlayer';
+import { EventBus, PLAYBACK_POSITION, PLAYER_STATUS } from 'common';
+import type { PlaybackPositionData } from 'common';
 
 /**
  * 主页面 — Tabs + MiniPlayer 架构（ADR-002）
  *
  * 5 个 Tab：首页 / 订阅 / 收件箱 / 队列 / 更多
  * 底部常驻 MiniPlayer（有媒体播放时显示）
+ * MiniPlayer 通过 EventBus 监听 PLAYBACK_POSITION + PLAYER_STATUS 实时更新
  */
 @Entry
 @Component
@@ -25,7 +28,53 @@ struct Index {
   @State miniPlayerProgress: number = 0;
   @State miniPlayerImageUrl: string = '';
 
+  private positionCallback: (data: PlaybackPositionData) => void = (data: PlaybackPositionData) => {
+    // 更新进度
+    this.miniPlayerProgress = data.duration > 0 ? data.position / data.duration : 0;
+    // 第一次收到位置事件时，刷新元信息并显示
+    if (!this.miniPlayerVisible) {
+      this.miniPlayerVisible = true;
+      this.refreshMiniPlayerInfo();
+    }
+  };
+
+  private statusCallback: () => void = () => {
+    const ctrl = getController();
+    this.miniPlayerIsPlaying = ctrl.isPlaying();
+    const item = ctrl.getCurrentItem();
+    if (item !== null) {
+      this.miniPlayerVisible = true;
+      this.refreshMiniPlayerInfo();
+    } else {
+      // 播放停止且没有当前 item → 隐藏
+      this.miniPlayerVisible = false;
+    }
+  };
+
+  private refreshMiniPlayerInfo(): void {
+    const ctrl = getController();
+    const item = ctrl.getCurrentItem();
+    const feed = ctrl.getCurrentFeed();
+    if (item !== null) {
+      this.miniPlayerTitle = item.title ?? '';
+      this.miniPlayerFeedTitle = feed !== null ? (feed.getTitle() ?? '') : '';
+      this.miniPlayerImageUrl = item.getImageLocation() ?? (feed !== null ? (feed.imageUrl ?? '') : '');
+      this.miniPlayerIsPlaying = ctrl.isPlaying();
+    }
+  }
+
   aboutToAppear(): void {
+    // EventBus 监听播放位置 + 状态
+    EventBus.on<PlaybackPositionData>(PLAYBACK_POSITION, this.positionCallback);
+    EventBus.on<void>(PLAYER_STATUS, this.statusCallback);
+
+    // 若 App 启动时已有播放内容（后台恢复），立刻刷新 MiniPlayer
+    const item = getController().getCurrentItem();
+    if (item !== null) {
+      this.miniPlayerVisible = true;
+      this.refreshMiniPlayerInfo();
+    }
+
     // 处理通知点击跳转（冷启动）
     const pendingPage = AppStorage.get<string>('pendingNotificationPage');
     if (pendingPage !== undefined && pendingPage.length > 0) {
@@ -46,6 +95,11 @@ struct Index {
         router.pushUrl({ url: pendingPage, params: params });
       }, 300);
     }
+  }
+
+  aboutToDisappear(): void {
+    EventBus.off(PLAYBACK_POSITION, this.positionCallback);
+    EventBus.off(PLAYER_STATUS, this.statusCallback);
   }
 
   build() {
@@ -106,16 +160,26 @@ struct Index {
           onPlayPause: () => {
             getController().playPause();
           },
+          onDismiss: () => {
+            // 左右滑动消失：暂停播放 + 隐藏 MiniPlayer（对标 Android STATE_HIDDEN）
+            getController().pause();
+            this.miniPlayerVisible = false;
+          },
           onTap: () => {
+            const ctrl = getController();
+            const item = ctrl.getCurrentItem();
             router.pushUrl({
               url: 'pages/FullPlayerPage',
               params: {
                 title: this.miniPlayerTitle,
                 feedTitle: this.miniPlayerFeedTitle,
                 isPlaying: this.miniPlayerIsPlaying,
-                position: 0,
-                duration: 0,
-                imageUrl: this.miniPlayerImageUrl
+                position: ctrl.getPosition(),
+                duration: item !== null && item.media !== null ? item.media.duration : 0,
+                imageUrl: this.miniPlayerImageUrl,
+                itemId: item !== null ? item.id : 0,
+                isFavorite: item !== null ? item.isFavorite() : false,
+                mediaUrl: item !== null && item.media !== null ? (item.media.downloadUrl ?? '') : ''
               }
             });
           }
@@ -130,10 +194,10 @@ struct Index {
   // DR-001: 使用 HarmonyOS 系统符号替代 emoji
   private tabSymbols: Resource[] = [
     $r('sys.symbol.house'),                              // 首页
-    $r('sys.symbol.music_note_list'),                    // 队列（播放列表）
-    $r('sys.symbol.tray'),                               // 收件箱
-    $r('sys.symbol.square_stack'),                       // 订阅
-    $r('sys.symbol.ellipsis')                            // 更多
+    $r('sys.symbol.music_note_list'),                    // 队列
+    $r('sys.symbol.envelope'),                           // 收件箱
+    $r('sys.symbol.circle_grid_2x2'),                   // 订阅
+    $r('sys.symbol.dot_grid_2x2')                       // 更多
   ];
 
   @Builder

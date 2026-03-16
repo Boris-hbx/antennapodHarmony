@@ -9,6 +9,16 @@
     "pages/HistoryPage",
     "pages/StatisticsPage",
     "pages/SettingsPage",
-    "pages/SearchPage"
+    "pages/SearchPage",
+    "pages/FeedSettingsPage",
+    "pages/FeedInfoPage",
+    "pages/DiscoverPage",
+    "pages/SettingsUserInterfacePage",
+    "pages/SettingsPlaybackPage",
+    "pages/SettingsDownloadsPage",
+    "pages/SettingsSyncPage",
+    "pages/SettingsBackupPage",
+    "pages/SettingsNotificationsPage",
+    "pages/TagManagementPage"
   ]
 }
