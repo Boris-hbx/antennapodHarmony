@@ -1,8 +1,9 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { router, window } from '@kit.ArkUI';
-import { getDatabase, initUserPreferences, initPlaybackPreferences, getTheme } from 'datastore';
+import { getDatabase, initUserPreferences, initPlaybackPreferences, getTheme, getUpdateInterval } from 'datastore';
 import { PlaybackController } from 'playback';
+import { refreshAllFeeds } from 'network';
 import { EventBus, DOWNLOAD_COMPLETE } from 'common';
 import type { DownloadCompleteData } from 'common';
 import { sendDownloadCompleteNotification } from '../components/NotificationHelper';
@@ -23,6 +24,8 @@ export default class EntryAbility extends UIAbility {
   private downloadCompleteCallback: (data: DownloadCompleteData) => void = (data) => {
     sendDownloadCompleteNotification(data.episodeTitle);
   };
+  private autoRefreshTimer: number = -1;
+  private servicesReady: boolean = false;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     try {
@@ -98,6 +101,10 @@ export default class EntryAbility extends UIAbility {
     // 监听下载完成事件 → 发送通知
     EventBus.on<DownloadCompleteData>(DOWNLOAD_COMPLETE, this.downloadCompleteCallback);
 
+    // 标记服务就绪 + 启动自动定时刷新
+    this.servicesReady = true;
+    this.startAutoRefresh();
+
     // 处理冷启动时的 Widget 操作
     const pendingAction = AppStorage.get<string>('pendingWidgetAction');
     if (pendingAction !== undefined && pendingAction.length > 0 && globalController !== null) {
@@ -159,6 +166,7 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
+    this.stopAutoRefresh();
     EventBus.off(DOWNLOAD_COMPLETE, this.downloadCompleteCallback);
     if (globalController !== null) {
       globalController.release();
@@ -185,9 +193,43 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
+    // 回前台时重新读取刷新间隔（用户可能改了设置）
+    // 首次启动时 initServices 尚未完成，servicesReady 为 false，跳过
+    if (this.servicesReady) {
+      this.startAutoRefresh();
+    }
   }
 
   onBackground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+    this.stopAutoRefresh();
+  }
+
+  // ===== 自动定时刷新 =====
+
+  private startAutoRefresh(): void {
+    this.stopAutoRefresh();
+    const intervalMinutes = getUpdateInterval();
+    if (intervalMinutes <= 0) {
+      hilog.info(DOMAIN, 'testTag', 'Auto refresh disabled (interval=0)');
+      return;
+    }
+    const intervalMs = intervalMinutes * 60 * 1000;
+    hilog.info(DOMAIN, 'testTag', 'Auto refresh started: every %{public}d minutes', intervalMinutes);
+    this.autoRefreshTimer = setInterval(() => {
+      hilog.info(DOMAIN, 'testTag', 'Auto refresh: refreshing all feeds...');
+      refreshAllFeeds().then(() => {
+        hilog.info(DOMAIN, 'testTag', 'Auto refresh: done');
+      }).catch((e: Error) => {
+        hilog.error(DOMAIN, 'testTag', 'Auto refresh failed: %{public}s', e.message);
+      });
+    }, intervalMs);
+  }
+
+  private stopAutoRefresh(): void {
+    if (this.autoRefreshTimer >= 0) {
+      clearInterval(this.autoRefreshTimer);
+      this.autoRefreshTimer = -1;
+    }
   }
 }

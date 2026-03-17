@@ -28,10 +28,10 @@ export { DownloadStatus } from './model/DownloadStatus';
 export { EventBus,
   FEED_LIST_UPDATE, FEED_ITEM_UPDATE, QUEUE_UPDATE, FAVORITES_UPDATE,
   UNREAD_UPDATE, PLAYBACK_POSITION, PLAYER_STATUS, DOWNLOAD_PROGRESS,
-  FEED_UPDATE_RUNNING, DOWNLOAD_COMPLETE
+  FEED_UPDATE_RUNNING, DOWNLOAD_COMPLETE, DOWNLOAD_ERROR
 } from './event/EventBus';
 export type {
   FeedListUpdateData, FeedItemUpdateData, QueueUpdateData,
   PlaybackPositionData, DownloadProgressData, FeedUpdateRunningData,
-  DownloadCompleteData
+  DownloadCompleteData, DownloadErrorData
 } from './event/EventBus';

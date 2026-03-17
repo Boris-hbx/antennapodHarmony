@@ -4,7 +4,8 @@ import { Feed, FeedItem, FeedMedia, FeedItemFilter, SortOrder, PlayState, TAG_QU
   EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE } from 'common';
 import type { QueueUpdateData, DownloadProgressData, DownloadCompleteData } from 'common';
 import { getFeed, getFeedItemList, addQueueItem, removeQueueItem,
-  addFavoriteItem, removeFavoriteItem, markItemPlayed, deleteFeedMediaOfItem } from 'datastore';
+  addFavoriteItem, removeFavoriteItem, markItemPlayed, deleteFeedMediaOfItem,
+  setFeedCustomTitle } from 'datastore';
 import { refreshFeed, downloadNow, isDownloading, getDownloadProgress, cancelDownload } from 'network';
 import { pasteboard } from '@kit.BasicServicesKit';
 
@@ -32,6 +33,8 @@ struct EpisodeListPage {
   @State showSortSheet: boolean = false;
   @State showFilterSheet: boolean = false;
   @State filterPlayed: string = 'ALL';
+  @State showRenameSheet: boolean = false;
+  @State renameText: string = '';
   @State filterDownloaded: string = 'ALL';
   @State filterFavorite: boolean = false;
   private downloadTimers: Map<string, number> = new Map(); // url → timerId（未使用，保留兼容）
@@ -158,6 +161,15 @@ struct EpisodeListPage {
                         .fontColor([Color.White])
                     }
                     .width(40).height(40)
+                    .bindMenu([
+                      {
+                        value: '重命名',
+                        action: () => {
+                          this.renameText = this.feed?.customTitle ?? this.feed?.feedTitle ?? '';
+                          this.showRenameSheet = true;
+                        }
+                      }
+                    ])
                   }
                   .width('100%')
                   .padding({ left: 8, right: 8 })
@@ -355,6 +367,11 @@ struct EpisodeListPage {
     })
     // Task-024: 筛选弹窗
     .bindSheet($$this.showFilterSheet, () => { this.FilterSheetBuilder(); }, {
+      detents: [SheetSize.FIT_CONTENT],
+      showClose: true,
+      dragBar: true
+    })
+    .bindSheet($$this.showRenameSheet, () => { this.RenameSheetBuilder(); }, {
       detents: [SheetSize.FIT_CONTENT],
       showClose: true,
       dragBar: true
@@ -991,6 +1008,58 @@ struct EpisodeListPage {
       this.publishCycleText = '约每月更新';
     } else {
       this.publishCycleText = `约每 ${avgDays} 天更新`;
+    }
+  }
+
+  // ===== 重命名弹窗 =====
+
+  @Builder
+  RenameSheetBuilder() {
+    Column() {
+      Text('重命名订阅')
+        .fontSize(18)
+        .fontWeight(FontWeight.Bold)
+        .padding({ left: 16, top: 16, bottom: 12 })
+        .width('100%')
+
+      TextInput({ placeholder: '输入新名称', text: this.renameText })
+        .onChange((value: string) => { this.renameText = value; })
+        .width('90%')
+        .height(44)
+        .borderRadius(8)
+
+      Row() {
+        Button('取消')
+          .layoutWeight(1)
+          .type(ButtonType.Normal)
+          .height(40)
+          .fontSize(15)
+          .fontColor('#333333')
+          .backgroundColor('#F0F0F0')
+          .borderRadius(20)
+          .margin({ right: 8 })
+          .onClick(() => { this.showRenameSheet = false; })
+        Button('确定')
+          .layoutWeight(1)
+          .type(ButtonType.Normal)
+          .height(40)
+          .fontSize(15)
+          .fontColor('#FFFFFF')
+          .backgroundColor('#0078C2')
+          .borderRadius(20)
+          .margin({ left: 8 })
+          .onClick(async () => {
+            if (this.feed !== null) {
+              const newTitle = this.renameText.trim().length > 0 ? this.renameText.trim() : null;
+              await setFeedCustomTitle(this.feed.id, newTitle);
+              this.showRenameSheet = false;
+              promptAction.showToast({ message: '已重命名', duration: 1500 });
+              await this.loadFeed();
+            }
+          })
+      }
+      .width('90%')
+      .padding({ top: 16, bottom: 16 })
     }
   }
 

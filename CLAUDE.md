@@ -19,7 +19,7 @@
 1. **先有 Spec 才能编码** — 确认 PM 中心有对应功能规格
 2. **遇到平台冲突必须提 DR** — 不允许自行偏离 Android 原版行为
 3. **DR 🔴 未裁决 = 阻塞** — 停止实现，等 PM 裁决
-4. **完成后记经验** — 评估是否需要记录 Pitfall/Pattern/API Note
+4. **完成后必须总结经验** — 每次完成任务或修复 bug 后，必须回顾遇到的问题并记录 Pitfall/Pattern/API Note（若确实无新经验，需在回复中明确说明"本次无新经验可记"）
 
 ## 关联工程
 
@@ -42,7 +42,7 @@
    - [ ] 对照 Spec 逐项自查，确认无遗漏
    - [ ] 读自己写的代码，检查是否有明显问题
 7. **交付**：`node C:\Project\antennapodPM\scripts\complete-task.js --done "任务关键词"`
-8. 评估是否需要记录经验到 `C:\Project\antennapodPM\knowledge\`
+8. **【强制】总结经验**：回顾本次工作中遇到的坑、发现的模式、API 行为差异，记录到 `C:\Project\antennapodPM\knowledge\`。若确实无新经验，必须在回复中明确说明"本次无新经验可记"，不可默默跳过
 
 ---
 

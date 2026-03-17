@@ -16,6 +16,7 @@ export const PLAYER_STATUS = 'PLAYER_STATUS';
 export const DOWNLOAD_PROGRESS = 'DOWNLOAD_PROGRESS';
 export const FEED_UPDATE_RUNNING = 'FEED_UPDATE_RUNNING';
 export const DOWNLOAD_COMPLETE = 'DOWNLOAD_COMPLETE';
+export const DOWNLOAD_ERROR = 'DOWNLOAD_ERROR';
 
 // ===== 事件数据类型 =====
 
@@ -47,6 +48,13 @@ export interface FeedUpdateRunningData {
 export interface DownloadCompleteData {
   episodeTitle: string;
   feedId: number;
+}
+
+export interface DownloadErrorData {
+  url: string;
+  episodeTitle: string;
+  errorType: string; // 'timeout' | 'network' | 'disk_full' | 'not_found' | 'auth' | 'unknown'
+  message: string;
 }
 
 // ===== 事件总线实现 =====

@@ -1,11 +1,13 @@
 import { router, promptAction } from '@kit.ArkUI';
 import { Feed, EventBus, FEED_LIST_UPDATE } from 'common';
 import type { FeedListUpdateData } from 'common';
-import { addOrUpdateFeed } from 'datastore';
+import { addOrUpdateFeed, parseOpml } from 'datastore';
 import { httpRequest, prepareUrl, parseFeed, searchPodcasts, getTopPodcasts } from 'network';
 import type { FeedParseResult, ItunesResult } from 'network';
 import { FeedCover } from '../components/FeedCover';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { fileIo } from '@kit.CoreFileKit';
+import { picker } from '@kit.CoreFileKit';
 
 /**
  * 添加订阅页 — 6 种添加方式 + 热门播客网格
@@ -166,7 +168,7 @@ struct AddFeedPage {
           router.pushUrl({ url: 'pages/DiscoverPage' });
         })
         this.addMethodItem('OPML 导入', $r('sys.symbol.arrow_down'), '#607D8B', () => {
-          promptAction.showToast({ message: 'OPML 导入功能开发中', duration: 1500 });
+          this.importOpml();
         })
         this.addMethodItem('推荐播客', $r('sys.symbol.star'), '#FFC107', () => {
           this.scrollToPresets();
@@ -435,6 +437,46 @@ struct AddFeedPage {
   }
 
   // ===== 操作方法 =====
+
+  private async importOpml(): Promise<void> {
+    try {
+      const documentPicker = new picker.DocumentViewPicker();
+      const result = await documentPicker.select({
+        maxSelectNumber: 1,
+        fileSuffixFilters: ['.opml', '.xml']
+      });
+      if (result.length === 0) return;
+
+      const uri = result[0];
+      const file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      const stat = fileIo.statSync(file.fd);
+      const buf = new ArrayBuffer(stat.size);
+      fileIo.readSync(file.fd, buf);
+      fileIo.closeSync(file);
+
+      const content = String.fromCharCode(...new Uint8Array(buf));
+      const items = parseOpml(content);
+      if (items.length === 0) {
+        promptAction.showToast({ message: 'OPML 文件中没有订阅', duration: 1500 });
+        return;
+      }
+
+      let imported = 0;
+      for (const item of items) {
+        const feed = new Feed(item.xmlUrl);
+        feed.feedTitle = item.title;
+        feed.link = item.htmlUrl;
+        await addOrUpdateFeed(feed);
+        imported++;
+      }
+      EventBus.emit<FeedListUpdateData>(FEED_LIST_UPDATE, { feedIds: [] });
+      promptAction.showToast({ message: `已导入 ${imported} 个订阅`, duration: 2000 });
+    } catch (e) {
+      const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
+      if (msg.includes('cancel') || msg.includes('Cancel')) return; // 用户取消
+      promptAction.showToast({ message: '导入失败: ' + msg, duration: 2000 });
+    }
+  }
 
   private async pasteFromClipboard(): Promise<void> {
     try {

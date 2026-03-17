@@ -1,9 +1,16 @@
 import { http } from '@kit.NetworkKit';
-import { fileIo } from '@kit.CoreFileKit';
-import { FeedItem, FeedMedia, EventBus, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE } from 'common';
-import type { DownloadProgressData, DownloadCompleteData } from 'common';
-import { setFeedMediaPlaybackInfo, setFeedMediaDownloadInfo } from 'datastore';
+import { fileIo, statfs } from '@kit.CoreFileKit';
+import { FeedItem, FeedMedia, EventBus, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE, DOWNLOAD_ERROR } from 'common';
+import type { DownloadProgressData, DownloadCompleteData, DownloadErrorData } from 'common';
+import { setFeedMediaDownloadInfo } from 'datastore';
 import { getUserAgent } from '../http/HttpClient';
+
+// ===== 接口定义 =====
+
+interface DataReceiveProgressInfo {
+  receiveSize: number;
+  totalSize: number;
+}
 
 // ===== 下载状态 =====
 
@@ -22,9 +29,7 @@ export interface DownloadTask {
 // ===== 文件命名 =====
 
 function sanitizeFilename(name: string): string {
-  // 去除非法字符
   let safe = name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
-  // 限制长度
   if (safe.length > 200) {
     safe = safe.substring(0, 200);
   }
@@ -43,7 +48,7 @@ function getExtFromUrl(url: string): string {
     const ext = path.substring(dotIdx);
     if (ext.length <= 5) return ext;
   }
-  return '.mp3'; // 默认
+  return '.mp3';
 }
 
 export function generateLocalPath(filesDir: string, feedTitle: string,
@@ -57,9 +62,14 @@ export function generateLocalPath(filesDir: string, feedTitle: string,
 // ===== 下载管理器 =====
 
 const activeDownloads: Map<string, DownloadTask> = new Map();
+const activeHttpRequests: Map<string, http.HttpRequest> = new Map();
+
+// 进度节流：最多 200ms 发一次
+let lastProgressEmitTime: number = 0;
+const PROGRESS_THROTTLE_MS: number = 200;
 
 /**
- * 手动下载单集
+ * 手动下载单集 — 流式分块下载
  */
 export async function downloadNow(item: FeedItem, feedTitle: string,
   filesDir: string): Promise<void> {
@@ -67,7 +77,7 @@ export async function downloadNow(item: FeedItem, feedTitle: string,
   const media = item.media;
   const url = media.downloadUrl!;
 
-  if (activeDownloads.has(url)) return; // 已在下载中
+  if (activeDownloads.has(url)) return;
 
   const localPath = generateLocalPath(filesDir, feedTitle,
     item.title ?? 'episode', media.id, url);
@@ -87,27 +97,53 @@ export async function downloadNow(item: FeedItem, feedTitle: string,
   emitProgress();
 
   try {
-    await executeDownload(task, media);
+    await executeStreamDownload(task, media);
   } catch (e) {
     task.isActive = false;
-    emitProgress();
+    const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
+    const errorType = classifyError(msg);
+    console.error('DownloadManager: download failed: ' + msg);
+    EventBus.emit<DownloadErrorData>(DOWNLOAD_ERROR, {
+      url: url,
+      episodeTitle: task.itemTitle,
+      errorType: errorType,
+      message: msg
+    });
   } finally {
     activeDownloads.delete(url);
+    activeHttpRequests.delete(url);
     emitProgress();
   }
 }
 
 /**
- * 执行下载（支持断点续传）
+ * 错误分类
  */
-async function executeDownload(task: DownloadTask, media: FeedMedia): Promise<void> {
+function classifyError(msg: string): string {
+  const lower = msg.toLowerCase();
+  if (lower.includes('timeout')) return 'timeout';
+  if (lower.includes('network') || lower.includes('connect') || lower.includes('econnreset')) return 'network';
+  if (lower.includes('space') || lower.includes('nospc') || lower.includes('disk')) return 'disk_full';
+  if (lower.includes('404') || lower.includes('not found')) return 'not_found';
+  if (lower.includes('401') || lower.includes('403') || lower.includes('auth')) return 'auth';
+  return 'unknown';
+}
+
+/**
+ * 流式分块下载（核心重写）
+ *
+ * 使用 http.requestInStream + on('dataReceive') 实现：
+ * - 每收到一块数据立即写盘，内存占用恒定（仅一个 chunk 大小）
+ * - 实时进度更新（节流 200ms）
+ * - 断点续传（Range header + 追加写入）
+ * - 支持取消（abort HTTP 请求）
+ */
+async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Promise<void> {
   // 确保目录存在
   const dirPath = task.localPath.substring(0, task.localPath.lastIndexOf('/'));
   try {
     fileIo.mkdirSync(dirPath, true);
-  } catch (_e) {
-    // 目录可能已存在
-  }
+  } catch (_e) { /* 目录可能已存在 */ }
 
   // 检查已有文件大小（断点续传）
   let existingSize = 0;
@@ -118,8 +154,22 @@ async function executeDownload(task: DownloadTask, media: FeedMedia): Promise<vo
     existingSize = 0;
   }
 
+  // 磁盘空间预检（需要至少 50MB 可用空间）
+  try {
+    const freeBytes = statfs.getFreeSizeSync(dirPath);
+    if (freeBytes < 50 * 1024 * 1024) {
+      throw new Error('磁盘空间不足（可用空间 < 50MB）');
+    }
+  } catch (e) {
+    const msg = (e instanceof Error) ? e.message : '';
+    if (msg.includes('磁盘空间不足')) throw new Error(msg);
+    // statfs 可能不支持，忽略检查继续下载
+  }
+
   // 构建请求
   const httpRequest = http.createHttp();
+  activeHttpRequests.set(task.url, httpRequest);
+
   const headers: Record<string, string> = {
     'User-Agent': getUserAgent()
   };
@@ -127,87 +177,186 @@ async function executeDownload(task: DownloadTask, media: FeedMedia): Promise<vo
     headers['Range'] = `bytes=${existingSize}-`;
   }
 
-  try {
-    const response = await httpRequest.request(task.url, {
+  task.downloadedBytes = existingSize;
+
+  return new Promise<void>((resolve, reject) => {
+    // 打开文件准备写入
+    let fd: fileIo.File | null = null;
+    let totalSize = existingSize; // 初始已知大小
+    let headerReceived = false;
+    let needRestart = false;
+
+    // 监听 header 获取总大小
+    httpRequest.on('headersReceive', (header: Object) => {
+      if (headerReceived) return;
+      headerReceived = true;
+      const respHeaders = header as Record<string, string>;
+
+      // 获取 content-length
+      const contentLength = respHeaders['content-length'] ?? respHeaders['Content-Length'] ?? '0';
+      const bodySize = parseInt(contentLength, 10);
+
+      // 获取 HTTP 状态码相关信息
+      const contentRange = respHeaders['content-range'] ?? respHeaders['Content-Range'] ?? '';
+
+      if (contentRange.length > 0) {
+        // 206 Partial Content — 断点续传成功
+        // content-range: bytes 12345-67890/67891
+        const slashIdx = contentRange.indexOf('/');
+        if (slashIdx >= 0) {
+          const totalStr = contentRange.substring(slashIdx + 1);
+          if (totalStr !== '*') {
+            totalSize = parseInt(totalStr, 10);
+          }
+        }
+      } else {
+        // 200 OK — 服务器不支持 Range，需要从头下载
+        if (existingSize > 0) {
+          needRestart = true;
+          existingSize = 0;
+          task.downloadedBytes = 0;
+        }
+        totalSize = bodySize;
+      }
+
+      task.totalBytes = totalSize;
+
+      // 打开文件
+      try {
+        if (needRestart) {
+          // 从头开始：截断文件
+          fd = fileIo.openSync(task.localPath,
+            fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
+        } else if (existingSize > 0) {
+          // 追加写入
+          fd = fileIo.openSync(task.localPath,
+            fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.APPEND);
+        } else {
+          // 新文件
+          fd = fileIo.openSync(task.localPath,
+            fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE);
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+    // 监听数据块到达 — 每块立即写盘
+    httpRequest.on('dataReceive', (data: ArrayBuffer) => {
+      if (!task.isActive) return; // 已取消
+
+      if (fd !== null) {
+        try {
+          fileIo.writeSync(fd.fd, data);
+        } catch (e) {
+          reject(e);
+          return;
+        }
+      }
+
+      task.downloadedBytes += data.byteLength;
+      if (task.totalBytes > 0) {
+        task.progress = Math.round(task.downloadedBytes / task.totalBytes * 100);
+      }
+
+      // 节流发送进度
+      const now = Date.now();
+      if (now - lastProgressEmitTime >= PROGRESS_THROTTLE_MS) {
+        lastProgressEmitTime = now;
+        emitProgress();
+      }
+    });
+
+    // 监听数据接收完成
+    httpRequest.on('dataEnd', () => {
+      // 关闭文件
+      if (fd !== null) {
+        try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
+        fd = null;
+      }
+
+      if (!task.isActive) {
+        reject(new Error('Download cancelled'));
+        return;
+      }
+
+      // 下载完成 → 更新数据库
+      task.isActive = false;
+      task.progress = 100;
+      media.localFileUrl = task.localPath;
+      media.downloadDate = Date.now();
+      media.size = task.downloadedBytes;
+
+      setFeedMediaDownloadInfo(media.id, task.localPath, media.downloadDate, media.size)
+        .then(() => {
+          emitProgress();
+          EventBus.emit<DownloadCompleteData>(DOWNLOAD_COMPLETE, {
+            episodeTitle: task.itemTitle,
+            feedId: task.feedId
+          });
+          resolve();
+        })
+        .catch((e: Error) => { reject(e); });
+    });
+
+    // 监听数据接收进度（系统回调）
+    httpRequest.on('dataReceiveProgress', (info: DataReceiveProgressInfo) => {
+      if (info.totalSize > 0 && task.totalBytes === 0) {
+        task.totalBytes = existingSize + info.totalSize;
+      }
+    });
+
+    // 发起流式请求
+    httpRequest.requestInStream(task.url, {
       method: http.RequestMethod.GET,
       header: headers,
       connectTimeout: 15000,
-      readTimeout: 300000,
-      expectDataType: http.HttpDataType.ARRAY_BUFFER
-    });
-
-    const statusCode = response.responseCode;
-
-    // 416: Range 不满足，重新下载
-    if (statusCode === 416) {
-      existingSize = 0;
-      try { fileIo.unlinkSync(task.localPath); } catch (_e) { /* ignore */ }
-    }
-
-    // 200: 不支持 Range，重新下载
-    if (statusCode === 200 && existingSize > 0) {
-      existingSize = 0;
-    }
-
-    if (statusCode !== 200 && statusCode !== 206) {
-      throw new Error(`HTTP ${statusCode}`);
-    }
-
-    // 获取总大小
-    const respHeaders = response.header as Record<string, string>;
-    const contentLength = respHeaders['content-length'];
-    if (contentLength !== undefined) {
-      task.totalBytes = existingSize + parseInt(contentLength, 10);
-    }
-    task.downloadedBytes = existingSize;
-
-    // 写入文件
-    const body = response.result as ArrayBuffer;
-    const mode = existingSize > 0 ? fileIo.OpenMode.APPEND : fileIo.OpenMode.CREATE;
-    const fd = fileIo.openSync(task.localPath, fileIo.OpenMode.READ_WRITE | mode);
-    try {
-      fileIo.writeSync(fd.fd, body);
-      task.downloadedBytes += body.byteLength;
-      if (task.totalBytes > 0) {
-        task.progress = Math.round(task.downloadedBytes / task.totalBytes * 100);
-      } else {
-        task.progress = 100;
+      readTimeout: 30000 // 每块 30s，不是整体超时
+    }).then((statusCode: number) => {
+      // 状态码检查
+      if (statusCode === 416) {
+        // Range 不满足 — 删除本地文件重试
+        if (fd !== null) {
+          try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
+          fd = null;
+        }
+        try { fileIo.unlinkSync(task.localPath); } catch (_e) { /* ignore */ }
+        reject(new Error('Range not satisfiable (416), please retry'));
+        return;
       }
-      emitProgress();
-    } finally {
-      fileIo.closeSync(fd);
-    }
-
-    // 下载完成 → 更新数据库
-    task.isActive = false;
-    task.progress = 100;
-    media.localFileUrl = task.localPath;
-    media.downloadDate = Date.now();
-    media.size = task.downloadedBytes;
-    await setFeedMediaDownloadInfo(media.id, task.localPath, media.downloadDate, media.size);
-
-    emitProgress();
-
-    // 通知下载完成
-    EventBus.emit<DownloadCompleteData>(DOWNLOAD_COMPLETE, {
-      episodeTitle: task.itemTitle,
-      feedId: task.feedId
+      if (statusCode !== 200 && statusCode !== 206) {
+        if (fd !== null) {
+          try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
+          fd = null;
+        }
+        reject(new Error(`HTTP ${statusCode}`));
+      }
+      // 200/206 正常，等 dataEnd 回调
+    }).catch((e: Error) => {
+      if (fd !== null) {
+        try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
+        fd = null;
+      }
+      reject(e);
     });
-  } finally {
-    httpRequest.destroy();
-  }
+  });
 }
 
 /**
- * 取消下载
+ * 取消下载 — 中止 HTTP 请求
  */
 export function cancelDownload(downloadUrl: string): void {
   const task = activeDownloads.get(downloadUrl);
   if (task !== undefined) {
     task.isActive = false;
-    activeDownloads.delete(downloadUrl);
-    emitProgress();
   }
+  const httpReq = activeHttpRequests.get(downloadUrl);
+  if (httpReq !== undefined) {
+    try { httpReq.destroy(); } catch (_e) { /* ignore */ }
+    activeHttpRequests.delete(downloadUrl);
+  }
+  activeDownloads.delete(downloadUrl);
+  emitProgress();
 }
 
 /**
@@ -217,7 +366,11 @@ export function cancelAllDownloads(): void {
   for (const task of activeDownloads.values()) {
     task.isActive = false;
   }
+  for (const httpReq of activeHttpRequests.values()) {
+    try { httpReq.destroy(); } catch (_e) { /* ignore */ }
+  }
   activeDownloads.clear();
+  activeHttpRequests.clear();
   emitProgress();
 }
 

@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { FeedMedia, FeedItem, Feed, EventBus, PLAYER_STATUS, PLAYBACK_POSITION } from 'common';
 import type { PlaybackPositionData } from 'common';
 import {
@@ -107,8 +108,20 @@ export class PlaybackController {
     // 记录播放状态
     await writeMediaPlaying(media, feedId);
 
-    // 设置数据源
-    const isLocal = !stream && media.localFileUrl !== null && media.localFileUrl.length > 0;
+    // 设置数据源 — 播放前验证本地文件完整性
+    let isLocal = !stream && media.localFileUrl !== null && media.localFileUrl.length > 0;
+    if (isLocal) {
+      try {
+        const stat = fileIo.statSync(media.localFileUrl!);
+        if (stat.size === 0 || (media.size > 0 && stat.size < media.size * 0.95)) {
+          console.error('PlaybackController: local file incomplete (' + stat.size + '/' + media.size + '), fallback to stream');
+          isLocal = false;
+        }
+      } catch (_e) {
+        console.error('PlaybackController: local file not accessible, fallback to stream');
+        isLocal = false;
+      }
+    }
     const url = isLocal ? media.localFileUrl! : (media.downloadUrl ?? '');
     if (url.length === 0 && (media.downloadUrl ?? '').length === 0) {
       console.error('PlaybackController: Cannot play - no URL available for media id=' + media.id);

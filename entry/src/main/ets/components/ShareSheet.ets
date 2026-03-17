@@ -1,5 +1,7 @@
 ﻿import { promptAction } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { fileUri } from '@kit.CoreFileKit';
+import { Want, common } from '@kit.AbilityKit';
 
 /**
  * 分享弹窗组件（#12.5 — 对照 Android ShareDialog 复刻）
@@ -13,6 +15,7 @@ export struct ShareSheet {
   @Prop episodeLink: string = '';
   @Prop mediaUrl: string = '';
   @Prop isDownloaded: boolean = false;
+  @Prop localFilePath: string = '';
   @Prop positionMs: number = 0;
   @State includePosition: boolean = false;
 
@@ -58,7 +61,7 @@ export struct ShareSheet {
         this.shareCard(
           '媒体文件',
           '分享已下载的音频文件',
-          () => { promptAction.showToast({ message: '文件分享功能开发中', duration: 1500 }); }
+          () => { this.shareLocalFile(); }
         )
       }
 
@@ -133,6 +136,32 @@ export struct ShareSheet {
       text += `\n\nMedia file: ${url}`;
     }
     return text;
+  }
+
+  shareLocalFile(): void {
+    if (this.localFilePath.length === 0) {
+      promptAction.showToast({ message: '本地文件路径不可用', duration: 1500 });
+      return;
+    }
+    try {
+      const uri = fileUri.getUriFromPath(this.localFilePath);
+      const want: Want = {
+        action: 'ohos.want.action.sendData',
+        type: 'audio/*',
+        uri: uri,
+        flags: 1 // FLAG_AUTH_READ_URI_PERMISSION
+      };
+      const context = getContext(this) as common.UIAbilityContext;
+      context.startAbility(want).then(() => {
+        this.onClose?.();
+      }).catch((err: Error) => {
+        console.error('ShareSheet: startAbility failed: ' + err.message);
+        promptAction.showToast({ message: '分享失败: ' + err.message, duration: 2000 });
+      });
+    } catch (e) {
+      const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
+      promptAction.showToast({ message: '分享失败: ' + msg, duration: 2000 });
+    }
   }
 
   copyToClipboard(text: string): void {

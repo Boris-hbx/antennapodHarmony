@@ -458,7 +458,8 @@ struct FullPlayerPage {
           episodeTitle: this.title,
           episodeLink: this.itemLink,
           mediaUrl: this.mediaUrl,
-          isDownloaded: false,
+          isDownloaded: (getController().getCurrentMedia()?.localFileUrl ?? '').length > 0,
+          localFilePath: getController().getCurrentMedia()?.localFileUrl ?? '',
           positionMs: this.positionMs,
           onClose: () => { this.showShareSheet = false; }
         })
