@@ -5,13 +5,13 @@
         "name": "default",
         "type": "HarmonyOS",
         "material": {
-          "certpath": "C:\\Users\\huai\\.ohos\\config\\default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.cer",
+          "certpath": "C:/Users/huai/.ohos/config/default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.cer",
           "keyAlias": "debugKey",
-          "keyPassword": "0000001A858A3B742CF637A5A4C6936A4475F9891621A2BCF9761979E11557CF4699C3C0BF269D9B6D19",
-          "profile": "C:\\Users\\huai\\.ohos\\config\\default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.p7b",
+          "keyPassword": "0000001ABCEECFFC0DADF8FB544A6C61DBE25AB480E9B50009F14FC5D425CD095A62AA9203108C18ED9C",
+          "profile": "C:/Users/huai/.ohos/config/default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.p7b",
           "signAlg": "SHA256withECDSA",
-          "storeFile": "C:\\Users\\huai\\.ohos\\config\\default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.p12",
-          "storePassword": "0000001A03680E98300EE6A21B180E872F077EBCA940375566C501E9ECEA4EA8527110C1122C2A990586"
+          "storeFile": "C:/Users/huai/.ohos/config/default_antennapodHarmony_UYhvTPRQD3QNh9sEfGS-tncfsYJxqw3hd_Du7V5cP6M=.p12",
+          "storePassword": "0000001AFB92675AF5D14961176F94C112B344015BC8D22DAC5CE80C4541E6DF07A4BF926721F1604724"
         }
       }
     ],

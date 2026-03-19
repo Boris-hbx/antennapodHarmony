@@ -33,7 +33,8 @@ export type { FeedRefreshResult } from './http/FeedRefresher';
 export {
   downloadNow, cancelDownload, cancelAllDownloads,
   isDownloading, getDownloadProgress, getActiveDownloadCount,
-  getActiveDownloads, generateLocalPath
+  getActiveDownloads, generateLocalPath, requestProgressUpdate,
+  setDownloadLifecycleCallbacks
 } from './download/DownloadManager';
 export type { DownloadTask } from './download/DownloadManager';
 

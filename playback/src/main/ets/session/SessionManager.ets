@@ -19,6 +19,9 @@ export let onSessionSeek: (timeMs: number) => void = () => {};
 export let onSessionFastForward: () => void = () => {};
 export let onSessionRewind: () => void = () => {};
 export let onSessionPlayNext: () => void = () => {};
+export let onSessionStop: () => void = () => {};
+export let onSessionPlayPrevious: () => void = () => {};
+export let onSessionSetSpeed: (speed: number) => void = () => {};
 
 export interface SessionCallbacks {
   play: () => void;
@@ -27,6 +30,9 @@ export interface SessionCallbacks {
   fastForward: () => void;
   rewind: () => void;
   playNext: () => void;
+  stop: () => void;
+  playPrevious: () => void;
+  setSpeed: (speed: number) => void;
 }
 
 export function setSessionCallbacks(callbacks: SessionCallbacks): void {
@@ -36,6 +42,9 @@ export function setSessionCallbacks(callbacks: SessionCallbacks): void {
   onSessionFastForward = callbacks.fastForward;
   onSessionRewind = callbacks.rewind;
   onSessionPlayNext = callbacks.playNext;
+  onSessionStop = callbacks.stop;
+  onSessionPlayPrevious = callbacks.playPrevious;
+  onSessionSetSpeed = callbacks.setSpeed;
 }
 
 /**
@@ -70,6 +79,7 @@ export async function setSessionMetadata(media: FeedMedia, item: FeedItem | null
     assetId: media.id.toString(),
     title: item?.title ?? 'Unknown',
     artist: feed?.author ?? '',
+    album: feed?.getTitle() ?? '',
     duration: media.duration
   };
 
@@ -147,5 +157,17 @@ function registerControlCommands(): void {
 
   session.on('playNext', () => {
     onSessionPlayNext();
+  });
+
+  session.on('stop', () => {
+    onSessionStop();
+  });
+
+  session.on('playPrevious', () => {
+    onSessionPlayPrevious();
+  });
+
+  session.on('setSpeed', (speed: number) => {
+    onSessionSetSpeed(speed);
   });
 }

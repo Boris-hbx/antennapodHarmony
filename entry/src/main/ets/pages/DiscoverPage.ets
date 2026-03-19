@@ -3,6 +3,7 @@ import { preferences } from '@kit.ArkData';
 import { Feed, EventBus, FEED_LIST_UPDATE } from 'common';
 import type { FeedListUpdateData } from 'common';
 import { addOrUpdateFeed } from 'datastore';
+import { LongPressHelper } from '../utils/LongPressHelper';
 import { getTopPodcasts, httpRequest, prepareUrl, parseFeed, searchPodcasts } from 'network';
 import type { ItunesResult, FeedParseResult } from 'network';
 
@@ -24,6 +25,7 @@ struct DiscoverPage {
   @State selectedCountry: string = 'CN';
   @State hiddenFeedUrls: Set<string> = new Set();
   @State showCountryPicker: boolean = false;
+  private lp = new LongPressHelper();
 
   private prefs: preferences.Preferences | null = null;
 
@@ -201,15 +203,16 @@ struct DiscoverPage {
               }
               .width('30%')
               .margin({ left: '1.5%', right: '1.5%', bottom: 16 })
-              .onClick(() => {
-                this.subscribePodcast(feed);
+              .onTouch((e: TouchEvent) => {
+                this.lp.onTouch(e, () => {
+                  this.showHideAction(feed);
+                });
               })
-              .gesture(
-                LongPressGesture({ repeat: false })
-                  .onAction(() => {
-                    this.showHideAction(feed);
-                  })
-              )
+              .onClick(() => {
+                if (!this.lp.fired) {
+                  this.subscribePodcast(feed);
+                }
+              })
             }, (feed: ItunesResult) => feed.feedUrl)
           }
           .padding({ left: 8, right: 8 })

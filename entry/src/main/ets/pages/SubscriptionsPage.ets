@@ -4,6 +4,7 @@ import type { FeedListUpdateData } from 'common';
 import { getFeedList, getNavDrawerData, deleteFeed, setFeedCustomTitle } from 'datastore';
 import { refreshAllFeeds } from 'network';
 import { FeedCover } from '../components/FeedCover';
+import { LongPressHelper } from '../utils/LongPressHelper';
 
 /**
  * 订阅列表页 — Task-025: 排序/筛选/计数 ⋮ 菜单 + 长按完整操作菜单
@@ -29,6 +30,7 @@ export struct SubscriptionsPage {
   @State selectedFeed: Feed | null = null;
   @State showRenameSheet: boolean = false;
   @State renameText: string = '';
+  private lp = new LongPressHelper();
 
   private feedUpdateCallback: (data: FeedListUpdateData) => void = () => {
     this.loadData();
@@ -237,22 +239,20 @@ export struct SubscriptionsPage {
                   .width('100%')
                   .padding({ left: 16, right: 16, top: 10, bottom: 10 })
                   .alignItems(VerticalAlign.Center)
-                  .gesture(
-                    GestureGroup(GestureMode.Exclusive,
-                      LongPressGesture({ repeat: false, duration: 500 })
-                        .onAction(() => {
-                          this.selectedFeed = feed;
-                          this.showFeedMenuSheet = true;
-                        }),
-                      TapGesture()
-                        .onAction(() => {
-                          router.pushUrl({
-                            url: 'pages/EpisodeListPage',
-                            params: { feedId: feed.id, feedTitle: feed.getTitle() }
-                          });
-                        })
-                    )
-                  )
+                  .onTouch((e: TouchEvent) => {
+                    this.lp.onTouch(e, () => {
+                      this.selectedFeed = feed;
+                      this.showFeedMenuSheet = true;
+                    });
+                  })
+                  .onClick(() => {
+                    if (!this.lp.fired) {
+                      router.pushUrl({
+                        url: 'pages/EpisodeListPage',
+                        params: { feedId: feed.id, feedTitle: feed.getTitle() }
+                      });
+                    }
+                  })
                 }
               }, (feed: Feed) => feed.id.toString())
             }
@@ -279,22 +279,20 @@ export struct SubscriptionsPage {
                       .textAlign(TextAlign.Center)
                   }
                   .padding(4)
-                  .gesture(
-                    GestureGroup(GestureMode.Exclusive,
-                      LongPressGesture({ repeat: false, duration: 500 })
-                        .onAction(() => {
-                          this.selectedFeed = feed;
-                          this.showFeedMenuSheet = true;
-                        }),
-                      TapGesture()
-                        .onAction(() => {
-                          router.pushUrl({
-                            url: 'pages/EpisodeListPage',
-                            params: { feedId: feed.id, feedTitle: feed.getTitle() }
-                          });
-                        })
-                    )
-                  )
+                  .onTouch((e: TouchEvent) => {
+                    this.lp.onTouch(e, () => {
+                      this.selectedFeed = feed;
+                      this.showFeedMenuSheet = true;
+                    });
+                  })
+                  .onClick(() => {
+                    if (!this.lp.fired) {
+                      router.pushUrl({
+                        url: 'pages/EpisodeListPage',
+                        params: { feedId: feed.id, feedTitle: feed.getTitle() }
+                      });
+                    }
+                  })
                 }
               }, (feed: Feed) => feed.id.toString())
             }

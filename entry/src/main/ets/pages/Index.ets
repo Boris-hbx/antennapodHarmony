@@ -8,6 +8,7 @@ import { MorePage } from './MorePage';
 import { MiniPlayer } from '../components/MiniPlayer';
 import { EventBus, PLAYBACK_POSITION, PLAYER_STATUS } from 'common';
 import type { PlaybackPositionData } from 'common';
+import { getFastForwardSecs, getRewindSecs } from 'datastore';
 
 /**
  * 主页面 — Tabs + MiniPlayer 架构（ADR-002）
@@ -160,28 +161,19 @@ struct Index {
           onPlayPause: () => {
             getController().playPause();
           },
+          onRewind: () => {
+            getController().seekDelta(-getRewindSecs() * 1000);
+          },
+          onFastForward: () => {
+            getController().seekDelta(getFastForwardSecs() * 1000);
+          },
           onDismiss: () => {
             // 左右滑动消失：暂停播放 + 隐藏 MiniPlayer（对标 Android STATE_HIDDEN）
             getController().pause();
             this.miniPlayerVisible = false;
           },
           onTap: () => {
-            const ctrl = getController();
-            const item = ctrl.getCurrentItem();
-            router.pushUrl({
-              url: 'pages/FullPlayerPage',
-              params: {
-                title: this.miniPlayerTitle,
-                feedTitle: this.miniPlayerFeedTitle,
-                isPlaying: this.miniPlayerIsPlaying,
-                position: ctrl.getPosition(),
-                duration: item !== null && item.media !== null ? item.media.duration : 0,
-                imageUrl: this.miniPlayerImageUrl,
-                itemId: item !== null ? item.id : 0,
-                isFavorite: item !== null ? item.isFavorite() : false,
-                mediaUrl: item !== null && item.media !== null ? (item.media.downloadUrl ?? '') : ''
-              }
-            });
+            router.pushUrl({ url: 'pages/FullPlayerPage' });
           }
         })
       }

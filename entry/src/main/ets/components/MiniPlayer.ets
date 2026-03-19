@@ -14,6 +14,8 @@ export struct MiniPlayer {
   @Prop progress: number = 0; // 0~1
 
   onPlayPause?: () => void;
+  onFastForward?: () => void;
+  onRewind?: () => void;
   onTap?: () => void;
   onDismiss?: () => void; // 左右滑动消失回调
 
@@ -62,7 +64,18 @@ export struct MiniPlayer {
           .margin({ left: 12 })
           .alignItems(HorizontalAlign.Start)
 
-          // 播放/暂停按钮 48x48 点击区域
+          // 快退按钮
+          Stack({ alignContent: Alignment.Center }) {
+            SymbolGlyph($r('sys.symbol.gobackward_15'))
+              .fontSize(20)
+              .fontColor(['#1A1A1A'])
+          }
+          .width(40)
+          .height(48)
+          .onClick(() => { this.onRewind?.(); })
+          .hitTestBehavior(HitTestMode.Block)
+
+          // 播放/暂停按钮
           Stack({ alignContent: Alignment.Center }) {
             SymbolGlyph(this.isPlaying ? $r('sys.symbol.pause_fill') : $r('sys.symbol.play_fill'))
               .fontSize(26)
@@ -70,10 +83,19 @@ export struct MiniPlayer {
           }
           .width(48)
           .height(48)
-          .borderRadius(24)
-          .onClick(() => {
-            this.onPlayPause?.();
-          })
+          .onClick(() => { this.onPlayPause?.(); })
+          .hitTestBehavior(HitTestMode.Block)
+
+          // 快进按钮
+          Stack({ alignContent: Alignment.Center }) {
+            SymbolGlyph($r('sys.symbol.goforward_30'))
+              .fontSize(20)
+              .fontColor(['#1A1A1A'])
+          }
+          .width(40)
+          .height(48)
+          .onClick(() => { this.onFastForward?.(); })
+          .hitTestBehavior(HitTestMode.Block)
         }
         .width('100%')
         .layoutWeight(1)
@@ -101,7 +123,14 @@ export struct MiniPlayer {
       // 拖动时水平偏移 + 透明度随距离渐变
       .translate({ x: this.swipeOffsetX })
       .opacity(1 - Math.min(Math.abs(this.swipeOffsetX) / this.DISMISS_THRESHOLD, 1) * 0.5)
-      // 左右滑动手势
+      // 点击 → 打开全屏播放器（priorityGesture 优先级高于 PanGesture）
+      .priorityGesture(
+        TapGesture()
+          .onAction(() => {
+            this.onTap?.();
+          })
+      )
+      // 左右滑动 → dismiss
       .gesture(
         PanGesture({ direction: PanDirection.Horizontal })
           .onActionUpdate((event: GestureEvent) => {
@@ -109,18 +138,13 @@ export struct MiniPlayer {
           })
           .onActionEnd(() => {
             if (Math.abs(this.swipeOffsetX) >= this.DISMISS_THRESHOLD) {
-              // 超过阈值 → 触发 dismiss
               this.swipeOffsetX = 0;
               this.onDismiss?.();
             } else {
-              // 未超阈值 → 弹回
               this.swipeOffsetX = 0;
             }
           })
       )
-      .onClick(() => {
-        this.onTap?.();
-      })
     }
   }
 }

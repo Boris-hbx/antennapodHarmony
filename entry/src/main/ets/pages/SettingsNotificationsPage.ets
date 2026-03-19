@@ -1,4 +1,8 @@
 import { router } from '@kit.ArkUI';
+import { getNotifyNewEpisodes, setNotifyNewEpisodes,
+  getNotifyDownloadComplete, setNotifyDownloadComplete,
+  getNotifyDownloadError, setNotifyDownloadError,
+  getNotifySyncError, setNotifySyncError } from 'datastore';
 
 /**
  * 设置 — 通知
@@ -11,6 +15,13 @@ struct SettingsNotificationsPage {
   @State notifyDownloadComplete: boolean = true;
   @State notifyDownloadError: boolean = true;
   @State notifySyncError: boolean = true;
+
+  aboutToAppear(): void {
+    this.notifyNewEpisodes = getNotifyNewEpisodes();
+    this.notifyDownloadComplete = getNotifyDownloadComplete();
+    this.notifyDownloadError = getNotifyDownloadError();
+    this.notifySyncError = getNotifySyncError();
+  }
 
   build() {
     Column() {
@@ -41,8 +52,9 @@ struct SettingsNotificationsPage {
 
         ListItem() {
           this.switchRow('新单集通知', '订阅的播客有新单集时推送通知',
-            this.notifyNewEpisodes, (v: boolean) => {
+            this.notifyNewEpisodes, async (v: boolean) => {
               this.notifyNewEpisodes = v;
+              await setNotifyNewEpisodes(v);
             })
         }
 
@@ -51,8 +63,9 @@ struct SettingsNotificationsPage {
 
         ListItem() {
           this.switchRow('下载完成通知', '单集下载完成后提醒',
-            this.notifyDownloadComplete, (v: boolean) => {
+            this.notifyDownloadComplete, async (v: boolean) => {
               this.notifyDownloadComplete = v;
+              await setNotifyDownloadComplete(v);
             })
         }
 
@@ -61,14 +74,16 @@ struct SettingsNotificationsPage {
 
         ListItem() {
           this.switchRow('下载错误通知', '下载失败时显示通知',
-            this.notifyDownloadError, (v: boolean) => {
+            this.notifyDownloadError, async (v: boolean) => {
               this.notifyDownloadError = v;
+              await setNotifyDownloadError(v);
             })
         }
         ListItem() {
           this.switchRow('同步错误通知', '同步失败时显示通知',
-            this.notifySyncError, (v: boolean) => {
+            this.notifySyncError, async (v: boolean) => {
               this.notifySyncError = v;
+              await setNotifySyncError(v);
             })
         }
       }

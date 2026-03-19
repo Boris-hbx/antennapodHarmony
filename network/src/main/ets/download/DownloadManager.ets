@@ -2,7 +2,7 @@ import { http } from '@kit.NetworkKit';
 import { fileIo, statfs } from '@kit.CoreFileKit';
 import { FeedItem, FeedMedia, EventBus, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE, DOWNLOAD_ERROR } from 'common';
 import type { DownloadProgressData, DownloadCompleteData, DownloadErrorData } from 'common';
-import { setFeedMediaDownloadInfo } from 'datastore';
+import { setFeedMediaDownloadInfo, addDownloadLog } from 'datastore';
 import { getUserAgent } from '../http/HttpClient';
 
 // ===== 接口定义 =====
@@ -68,16 +68,131 @@ const activeHttpRequests: Map<string, http.HttpRequest> = new Map();
 let lastProgressEmitTime: number = 0;
 const PROGRESS_THROTTLE_MS: number = 200;
 
+// 停滞检测：60 秒无数据则判定为停滞
+const STALL_TIMEOUT_MS: number = 60000;
+// 整体超时：15 分钟
+const OVERALL_TIMEOUT_MS: number = 15 * 60 * 1000;
+
+// 下载开始/结束的回调，由 EntryAbility 注册
+let onDownloadStartCallback: (() => void) | null = null;
+let onDownloadEndCallback: (() => void) | null = null;
+
+export function setDownloadLifecycleCallbacks(
+  onStart: () => void, onEnd: () => void): void {
+  onDownloadStartCallback = onStart;
+  onDownloadEndCallback = onEnd;
+}
+
+// ===== 下载上下文：管理单次下载的定时器和 settle 状态 =====
+
+class DownloadContext {
+  settled: boolean = false;
+  fd: fileIo.File | null = null;
+  stallTimerId: number = -1;
+  overallTimerId: number = -1;
+  private resolveFunc: (() => void) | null = null;
+  private rejectFunc: ((e: Error) => void) | null = null;
+  private taskRef: DownloadTask;
+
+  constructor(task: DownloadTask) {
+    this.taskRef = task;
+  }
+
+  bind(resolveFn: () => void, rejectFn: (e: Error) => void): void {
+    this.resolveFunc = resolveFn;
+    this.rejectFunc = rejectFn;
+  }
+
+  safeReject(e: Error): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.clearTimers();
+    this.closeFile();
+    if (this.rejectFunc !== null) {
+      this.rejectFunc(e);
+    }
+  }
+
+  safeResolve(): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.clearTimers();
+    if (this.resolveFunc !== null) {
+      this.resolveFunc();
+    }
+  }
+
+  resetStallTimer(): void {
+    if (this.stallTimerId !== -1) {
+      clearTimeout(this.stallTimerId);
+    }
+    const ctx = this;
+    const task = this.taskRef;
+    this.stallTimerId = setTimeout((): void => {
+      if (ctx.settled || !task.isActive) return;
+      console.error(`DownloadManager: stall detected for ${task.itemTitle}, no data for ${STALL_TIMEOUT_MS / 1000}s`);
+      task.isActive = false;
+      const httpReq = activeHttpRequests.get(task.url);
+      if (httpReq !== undefined) {
+        try { httpReq.destroy(); } catch (_e) { /* ignore */ }
+      }
+      ctx.safeReject(new Error(`Download stalled: no data received for ${STALL_TIMEOUT_MS / 1000} seconds`));
+    }, STALL_TIMEOUT_MS);
+  }
+
+  startOverallTimer(): void {
+    const ctx = this;
+    const task = this.taskRef;
+    this.overallTimerId = setTimeout((): void => {
+      if (ctx.settled || !task.isActive) return;
+      console.error(`DownloadManager: overall timeout for ${task.itemTitle} after ${OVERALL_TIMEOUT_MS / 60000} min`);
+      task.isActive = false;
+      const httpReq = activeHttpRequests.get(task.url);
+      if (httpReq !== undefined) {
+        try { httpReq.destroy(); } catch (_e) { /* ignore */ }
+      }
+      ctx.safeReject(new Error(`Download timed out after ${OVERALL_TIMEOUT_MS / 60000} minutes`));
+    }, OVERALL_TIMEOUT_MS);
+  }
+
+  closeFile(): void {
+    if (this.fd !== null) {
+      try { fileIo.closeSync(this.fd); } catch (_e) { /* ignore */ }
+      this.fd = null;
+    }
+  }
+
+  private clearTimers(): void {
+    if (this.stallTimerId !== -1) {
+      clearTimeout(this.stallTimerId);
+      this.stallTimerId = -1;
+    }
+    if (this.overallTimerId !== -1) {
+      clearTimeout(this.overallTimerId);
+      this.overallTimerId = -1;
+    }
+  }
+}
+
 /**
  * 手动下载单集 — 流式分块下载
  */
 export async function downloadNow(item: FeedItem, feedTitle: string,
   filesDir: string): Promise<void> {
-  if (item.media === null || item.media.downloadUrl === null) return;
+  if (item.media === null || item.media.downloadUrl === null) {
+    console.warn('DownloadManager: skip — media or downloadUrl is null');
+    return;
+  }
   const media = item.media;
   const url = media.downloadUrl!;
 
-  if (activeDownloads.has(url)) return;
+  if (activeDownloads.has(url)) {
+    console.info('DownloadManager: skip — already downloading: ' + url);
+    return;
+  }
+
+  console.info(`DownloadManager: starting download "${item.title ?? ''}" url=${url.substring(0, 80)}`);
+  console.info(`DownloadManager: filesDir="${filesDir}", feedTitle="${feedTitle}"`);
 
   const localPath = generateLocalPath(filesDir, feedTitle,
     item.title ?? 'episode', media.id, url);
@@ -96,24 +211,78 @@ export async function downloadNow(item: FeedItem, feedTitle: string,
   activeDownloads.set(url, task);
   emitProgress();
 
+  // 通知生命周期：有下载开始
+  if (onDownloadStartCallback !== null) {
+    onDownloadStartCallback();
+  }
+
   try {
     await executeStreamDownload(task, media);
   } catch (e) {
-    task.isActive = false;
-    const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
-    const errorType = classifyError(msg);
+    const msg = extractErrorMessage(e as Object);
     console.error('DownloadManager: download failed: ' + msg);
-    EventBus.emit<DownloadErrorData>(DOWNLOAD_ERROR, {
-      url: url,
-      episodeTitle: task.itemTitle,
-      errorType: errorType,
-      message: msg
-    });
+
+    // 416 自动重试：删除残留文件后重新下载（不带 Range）
+    if (msg.includes('416')) {
+      console.info('DownloadManager: retrying without Range header...');
+      try { fileIo.unlinkSync(task.localPath); } catch (_e) { /* ignore */ }
+      task.isActive = true;
+      task.downloadedBytes = 0;
+      task.progress = 0;
+      try {
+        await executeStreamDownload(task, media);
+      } catch (e2) {
+        task.isActive = false;
+        const msg2 = extractErrorMessage(e2 as Object);
+        console.error('DownloadManager: retry also failed: ' + msg2);
+        const errorType2 = classifyError(msg2);
+        addDownloadLog(task.mediaId, 0, 1, false, msg2, task.itemTitle);
+        EventBus.emit<DownloadErrorData>(DOWNLOAD_ERROR, {
+          url: url,
+          episodeTitle: task.itemTitle,
+          errorType: errorType2,
+          message: msg2
+        });
+      }
+    } else {
+      task.isActive = false;
+      const errorType = classifyError(msg);
+      addDownloadLog(task.mediaId, 0, 1, false, msg, task.itemTitle);
+      EventBus.emit<DownloadErrorData>(DOWNLOAD_ERROR, {
+        url: url,
+        episodeTitle: task.itemTitle,
+        errorType: errorType,
+        message: msg
+      });
+    }
   } finally {
     activeDownloads.delete(url);
     activeHttpRequests.delete(url);
     emitProgress();
+
+    // 通知生命周期：下载结束（可能需要停止后台任务）
+    if (onDownloadEndCallback !== null) {
+      onDownloadEndCallback();
+    }
   }
+}
+
+/**
+ * 从异常对象中提取错误信息（兼容 Error / BusinessError / 其他）
+ */
+function extractErrorMessage(e: Object): string {
+  if (e instanceof Error) {
+    return e.message;
+  }
+  // HarmonyOS BusinessError 有 message 属性但不是 Error 子类
+  const obj = e as Record<string, Object>;
+  if (obj['message'] !== undefined) {
+    return String(obj['message']);
+  }
+  if (obj['code'] !== undefined) {
+    return `ErrorCode: ${String(obj['code'])}`;
+  }
+  return String(e);
 }
 
 /**
@@ -121,7 +290,7 @@ export async function downloadNow(item: FeedItem, feedTitle: string,
  */
 function classifyError(msg: string): string {
   const lower = msg.toLowerCase();
-  if (lower.includes('timeout')) return 'timeout';
+  if (lower.includes('timeout') || lower.includes('stall') || lower.includes('timed out')) return 'timeout';
   if (lower.includes('network') || lower.includes('connect') || lower.includes('econnreset')) return 'network';
   if (lower.includes('space') || lower.includes('nospc') || lower.includes('disk')) return 'disk_full';
   if (lower.includes('404') || lower.includes('not found')) return 'not_found';
@@ -130,15 +299,17 @@ function classifyError(msg: string): string {
 }
 
 /**
- * 流式分块下载（核心重写）
+ * 流式分块下载（核心）
  *
  * 使用 http.requestInStream + on('dataReceive') 实现：
- * - 每收到一块数据立即写盘，内存占用恒定（仅一个 chunk 大小）
+ * - 每收到一块数据立即写盘，内存占用恒定
  * - 实时进度更新（节流 200ms）
  * - 断点续传（Range header + 追加写入）
  * - 支持取消（abort HTTP 请求）
+ * - 停滞检测（60s 无数据自动取消）
+ * - 整体超时（15 分钟自动取消）
  */
-async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Promise<void> {
+function executeStreamDownload(task: DownloadTask, media: FeedMedia): Promise<void> {
   // 确保目录存在
   const dirPath = task.localPath.substring(0, task.localPath.lastIndexOf('/'));
   try {
@@ -149,6 +320,7 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
   let existingSize = 0;
   try {
     const stat = fileIo.statSync(task.localPath);
+    console.info(`DownloadManager: existing file found, size=${stat.size}, path=${task.localPath}`);
     existingSize = stat.size;
   } catch (_e) {
     existingSize = 0;
@@ -158,11 +330,13 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
   try {
     const freeBytes = statfs.getFreeSizeSync(dirPath);
     if (freeBytes < 50 * 1024 * 1024) {
-      throw new Error('磁盘空间不足（可用空间 < 50MB）');
+      return Promise.reject(new Error('磁盘空间不足（可用空间 < 50MB）'));
     }
   } catch (e) {
     const msg = (e instanceof Error) ? e.message : '';
-    if (msg.includes('磁盘空间不足')) throw new Error(msg);
+    if (msg.includes('磁盘空间不足')) {
+      return Promise.reject(new Error(msg));
+    }
     // statfs 可能不支持，忽略检查继续下载
   }
 
@@ -179,16 +353,21 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
 
   task.downloadedBytes = existingSize;
 
+  const ctx = new DownloadContext(task);
+  let totalSize = existingSize;
+  let headerReceived = false;
+  let needRestart = false;
+
   return new Promise<void>((resolve, reject) => {
-    // 打开文件准备写入
-    let fd: fileIo.File | null = null;
-    let totalSize = existingSize; // 初始已知大小
-    let headerReceived = false;
-    let needRestart = false;
+    ctx.bind(resolve, reject);
+
+    // 启动定时器
+    ctx.startOverallTimer();
+    ctx.resetStallTimer();
 
     // 监听 header 获取总大小
     httpRequest.on('headersReceive', (header: Object) => {
-      if (headerReceived) return;
+      if (headerReceived || ctx.settled) return;
       headerReceived = true;
       const respHeaders = header as Record<string, string>;
 
@@ -199,9 +378,10 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
       // 获取 HTTP 状态码相关信息
       const contentRange = respHeaders['content-range'] ?? respHeaders['Content-Range'] ?? '';
 
+      console.info(`DownloadManager: headers received, content-length=${bodySize}, content-range="${contentRange}"`);
+
       if (contentRange.length > 0) {
         // 206 Partial Content — 断点续传成功
-        // content-range: bytes 12345-67890/67891
         const slashIdx = contentRange.indexOf('/');
         if (slashIdx >= 0) {
           const totalStr = contentRange.substring(slashIdx + 1);
@@ -209,9 +389,11 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
             totalSize = parseInt(totalStr, 10);
           }
         }
+        console.info(`DownloadManager: resume mode, totalSize=${totalSize}, downloadedBytes=${task.downloadedBytes}`);
       } else {
         // 200 OK — 服务器不支持 Range，需要从头下载
         if (existingSize > 0) {
+          console.info(`DownloadManager: server doesn't support Range, restarting from scratch`);
           needRestart = true;
           existingSize = 0;
           task.downloadedBytes = 0;
@@ -224,32 +406,32 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
       // 打开文件
       try {
         if (needRestart) {
-          // 从头开始：截断文件
-          fd = fileIo.openSync(task.localPath,
+          ctx.fd = fileIo.openSync(task.localPath,
             fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
         } else if (existingSize > 0) {
-          // 追加写入
-          fd = fileIo.openSync(task.localPath,
+          ctx.fd = fileIo.openSync(task.localPath,
             fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.APPEND);
         } else {
-          // 新文件
-          fd = fileIo.openSync(task.localPath,
+          ctx.fd = fileIo.openSync(task.localPath,
             fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE);
         }
       } catch (e) {
-        reject(e);
+        ctx.safeReject(new Error(extractErrorMessage(e as Object)));
       }
     });
 
     // 监听数据块到达 — 每块立即写盘
     httpRequest.on('dataReceive', (data: ArrayBuffer) => {
-      if (!task.isActive) return; // 已取消
+      if (!task.isActive || ctx.settled) return;
 
-      if (fd !== null) {
+      // 收到数据，重置停滞定时器
+      ctx.resetStallTimer();
+
+      if (ctx.fd !== null) {
         try {
-          fileIo.writeSync(fd.fd, data);
+          fileIo.writeSync(ctx.fd.fd, data);
         } catch (e) {
-          reject(e);
+          ctx.safeReject(new Error(extractErrorMessage(e as Object)));
           return;
         }
       }
@@ -269,14 +451,12 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
 
     // 监听数据接收完成
     httpRequest.on('dataEnd', () => {
+      console.info(`DownloadManager: dataEnd for "${task.itemTitle}", downloaded=${task.downloadedBytes} bytes`);
       // 关闭文件
-      if (fd !== null) {
-        try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
-        fd = null;
-      }
+      ctx.closeFile();
 
-      if (!task.isActive) {
-        reject(new Error('Download cancelled'));
+      if (!task.isActive || ctx.settled) {
+        ctx.safeReject(new Error('Download cancelled'));
         return;
       }
 
@@ -289,14 +469,15 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
 
       setFeedMediaDownloadInfo(media.id, task.localPath, media.downloadDate, media.size)
         .then(() => {
+          addDownloadLog(task.mediaId, 0, 0, true, '', task.itemTitle);
           emitProgress();
           EventBus.emit<DownloadCompleteData>(DOWNLOAD_COMPLETE, {
             episodeTitle: task.itemTitle,
             feedId: task.feedId
           });
-          resolve();
+          ctx.safeResolve();
         })
-        .catch((e: Error) => { reject(e); });
+        .catch((e: Object) => { ctx.safeReject(new Error(extractErrorMessage(e))); });
     });
 
     // 监听数据接收进度（系统回调）
@@ -310,34 +491,23 @@ async function executeStreamDownload(task: DownloadTask, media: FeedMedia): Prom
     httpRequest.requestInStream(task.url, {
       method: http.RequestMethod.GET,
       header: headers,
-      connectTimeout: 15000,
-      readTimeout: 30000 // 每块 30s，不是整体超时
+      connectTimeout: 30000,
+      readTimeout: 120000
     }).then((statusCode: number) => {
-      // 状态码检查
+      console.info(`DownloadManager: HTTP status ${statusCode} for "${task.itemTitle}"`);
       if (statusCode === 416) {
-        // Range 不满足 — 删除本地文件重试
-        if (fd !== null) {
-          try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
-          fd = null;
-        }
+        console.warn(`DownloadManager: 416 Range Not Satisfiable — deleting partial file and failing`);
         try { fileIo.unlinkSync(task.localPath); } catch (_e) { /* ignore */ }
-        reject(new Error('Range not satisfiable (416), please retry'));
+        ctx.safeReject(new Error('Range not satisfiable (416), please retry'));
         return;
       }
       if (statusCode !== 200 && statusCode !== 206) {
-        if (fd !== null) {
-          try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
-          fd = null;
-        }
-        reject(new Error(`HTTP ${statusCode}`));
+        ctx.safeReject(new Error(`HTTP ${statusCode}`));
       }
-      // 200/206 正常，等 dataEnd 回调
-    }).catch((e: Error) => {
-      if (fd !== null) {
-        try { fileIo.closeSync(fd); } catch (_e) { /* ignore */ }
-        fd = null;
-      }
-      reject(e);
+    }).catch((e: Object) => {
+      const msg = extractErrorMessage(e);
+      console.error(`DownloadManager: request failed: ${msg}`);
+      ctx.safeReject(new Error(msg));
     });
   });
 }
@@ -405,6 +575,13 @@ export function getActiveDownloads(): DownloadTask[] {
     result.push(task);
   }
   return result;
+}
+
+/**
+ * 主动请求发送一次当前下载进度（供页面恢复时调用）
+ */
+export function requestProgressUpdate(): void {
+  emitProgress();
 }
 
 function emitProgress(): void {

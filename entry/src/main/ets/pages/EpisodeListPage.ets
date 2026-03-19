@@ -1,13 +1,14 @@
 ﻿import { router, promptAction } from '@kit.ArkUI';
 import { getController } from '../entryability/EntryAbility';
 import { Feed, FeedItem, FeedMedia, FeedItemFilter, SortOrder, PlayState, TAG_QUEUE, TAG_FAVORITE,
-  EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE } from 'common';
-import type { QueueUpdateData, DownloadProgressData, DownloadCompleteData } from 'common';
+  EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE, DOWNLOAD_ERROR } from 'common';
+import type { QueueUpdateData, DownloadProgressData, DownloadCompleteData, DownloadErrorData } from 'common';
 import { getFeed, getFeedItemList, addQueueItem, removeQueueItem,
   addFavoriteItem, removeFavoriteItem, markItemPlayed, deleteFeedMediaOfItem,
   setFeedCustomTitle } from 'datastore';
-import { refreshFeed, downloadNow, isDownloading, getDownloadProgress, cancelDownload } from 'network';
+import { refreshFeed, downloadNow, isDownloading, getDownloadProgress, cancelDownload, getActiveDownloads, requestProgressUpdate } from 'network';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { LongPressHelper } from '../utils/LongPressHelper';
 
 /**
  * 剧集列表页 — 对照 Android 截图逐像素还原
@@ -38,6 +39,7 @@ struct EpisodeListPage {
   @State filterDownloaded: string = 'ALL';
   @State filterFavorite: boolean = false;
   private downloadTimers: Map<string, number> = new Map(); // url → timerId（未使用，保留兼容）
+  private lp = new LongPressHelper();
   private pageOffset: number = 0;
   private readonly pageSize: number = 50;
 
@@ -55,6 +57,15 @@ struct EpisodeListPage {
     this.loadItems(true);
   };
 
+  private onDownloadError: (data: DownloadErrorData) => void = (data: DownloadErrorData) => {
+    // 下载失败：清除该 URL 的进度标记
+    this.downloadingUrls = new Map();
+    promptAction.showToast({
+      message: `下载失败: ${data.episodeTitle} (${data.errorType})`,
+      duration: 3000
+    });
+  };
+
   aboutToAppear(): void {
     const params = router.getParams() as Record<string, Object>;
     if (params !== null && params !== undefined) {
@@ -62,14 +73,23 @@ struct EpisodeListPage {
       this.feedTitle = params['feedTitle'] as string ?? '';
     }
     this.loadFeed();
-    this.loadItems(true).then(() => { this.calcPublishCycle(); });
+    this.loadItems(true).then(() => {
+      this.calcPublishCycle();
+      // items 加载完后再请求一次进度推送，确保 UI 显示正确
+      requestProgressUpdate();
+    });
+    // 先注册监听，再请求进度推送 — 保证不丢事件
     EventBus.on<DownloadProgressData>(DOWNLOAD_PROGRESS, this.onDownloadProgress);
     EventBus.on<DownloadCompleteData>(DOWNLOAD_COMPLETE, this.onDownloadComplete);
+    EventBus.on<DownloadErrorData>(DOWNLOAD_ERROR, this.onDownloadError);
+    // 立即请求一次当前下载进度（页面重新进入时恢复状态）
+    requestProgressUpdate();
   }
 
   aboutToDisappear(): void {
     EventBus.off(DOWNLOAD_PROGRESS, this.onDownloadProgress);
     EventBus.off(DOWNLOAD_COMPLETE, this.onDownloadComplete);
+    EventBus.off(DOWNLOAD_ERROR, this.onDownloadError);
   }
 
   async loadFeed(): Promise<void> {
@@ -283,21 +303,97 @@ struct EpisodeListPage {
           // ===== 单集列表 =====
           ForEach(this.items, (item: FeedItem) => {
             ListItem() {
-              this.episodeRow(item)
+              Row() {
+                // FD9: 列表项封面 56×56vp, FD7: 圆角 4vp
+                Image(item.getImageLocation() ?? this.feed?.imageUrl ?? '')
+                  .width(56)
+                  .height(56)
+                  .borderRadius(4)
+                  .objectFit(ImageFit.Cover)
+                  .margin({ right: 12 })
+
+                // 中间：信息区
+                Column() {
+                  // 第一行：≡→(新) · 日期 · 大小
+                  Row() {
+                    if (item.isNew()) {
+                      Text('≡→')
+                        .fontSize(11)
+                        .fontColor('#0078C2')
+                        .margin({ right: 4 })
+                    }
+                    Text(this.formatDate(item.pubDate))
+                      .fontSize(11)
+                      .fontColor('#444444')
+                    if (item.media !== null && item.media.size > 0) {
+                      Text(' · ')
+                        .fontSize(11)
+                        .fontColor('#444444')
+                      Text(this.formatSize(item.media.size))
+                        .fontSize(11)
+                        .fontColor('#444444')
+                    }
+                  }
+
+                  // 第二行：标题（BodyLarge 16fp，最多 2 行）
+                  Text(item.title ?? '')
+                    .fontSize(16)
+                    .fontWeight(FontWeight.Normal)
+                    .fontColor(item.isPlayed() ? '#444444' : '#000000')
+                    .maxLines(2)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .margin({ top: 4 })
+
+                  // 第三行：进度条 或 时长
+                  if (item.media !== null && item.media.position > 0 && item.media.duration > 0) {
+                    Row() {
+                      Text(this.formatTime(item.media.position))
+                        .fontSize(11)
+                        .fontColor('#444444')
+                      Progress({
+                        value: item.media.position,
+                        total: item.media.duration,
+                        type: ProgressType.Linear
+                      })
+                        .layoutWeight(1)
+                        .height(3)
+                        .color('#0078C2')
+                        .backgroundColor('#E0E0E0')
+                        .margin({ left: 6, right: 6 })
+                      Text(this.formatTime(item.media.duration))
+                        .fontSize(11)
+                        .fontColor('#444444')
+                    }
+                    .width('100%')
+                    .margin({ top: 4 })
+                    .alignItems(VerticalAlign.Center)
+                  } else if (item.media !== null && item.media.duration > 0) {
+                    Text(this.formatTime(item.media.duration))
+                      .fontSize(11)
+                      .fontColor('#444444')
+                      .margin({ top: 4 })
+                  }
+                }
+                .layoutWeight(1)
+
+                // 右侧：操作按钮（圆形描边 40vp）
+                this.actionButton(item)
+              }
+              .width('100%')
+              .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+              .alignItems(VerticalAlign.Center)
+              .onTouch((e: TouchEvent) => {
+                this.lp.onTouch(e, () => {
+                  this.selectedEpisode = item;
+                  this.showContextMenu = true;
+                });
+              })
+              .onClick(() => {
+                if (!this.lp.fired) {
+                  router.pushUrl({ url: 'pages/EpisodeDetailPage', params: { itemId: item.id } });
+                }
+              })
             }
-            .gesture(
-              GestureGroup(GestureMode.Exclusive,
-                LongPressGesture({ repeat: false })
-                  .onAction(() => {
-                    this.selectedEpisode = item;
-                    this.showContextMenu = true;
-                  }),
-                TapGesture()
-                  .onAction(() => {
-                    router.pushUrl({ url: 'pages/EpisodeDetailPage', params: { itemId: item.id } });
-                  })
-              )
-            )
             .swipeAction({
               start: {
                 builder: () => { this.swipeFavoriteButton(item) }
@@ -308,8 +404,7 @@ struct EpisodeListPage {
             })
           }, (item: FeedItem) => {
             const url = item.media !== null ? (item.media.downloadUrl ?? '') : '';
-            const dlPct = this.downloadingUrls.get(url) ?? 0;
-            const isDl = this.downloadingUrls.has(url) ? ('ing' + dlPct) : '';
+            const isDl = this.downloadingUrls.has(url) ? 'ing' : '';
             return item.id.toString() + '_' +
               (item.isFavorite() ? 'f' : '') +
               (item.isQueued() ? 'q' : '') +
@@ -376,90 +471,6 @@ struct EpisodeListPage {
       showClose: true,
       dragBar: true
     })
-  }
-
-  // ===== 单集行（逐像素还原 Android 截图）=====
-  @Builder
-  episodeRow(item: FeedItem) {
-    Row() {
-      // FD9: 列表项封面 56×56vp, FD7: 圆角 4vp
-      Image(item.getImageLocation() ?? this.feed?.imageUrl ?? '')
-        .width(56)
-        .height(56)
-        .borderRadius(4)
-        .objectFit(ImageFit.Cover)
-        .margin({ right: 12 })
-
-      // 中间：信息区
-      Column() {
-        // 第一行：≡→(新) · 日期 · 大小
-        Row() {
-          if (item.isNew()) {
-            Text('≡→')
-              .fontSize(11)
-              .fontColor('#0078C2')
-              .margin({ right: 4 })
-          }
-          Text(this.formatDate(item.pubDate))
-            .fontSize(11)
-            .fontColor('#444444')
-          if (item.media !== null && item.media.size > 0) {
-            Text(' · ')
-              .fontSize(11)
-              .fontColor('#444444')
-            Text(this.formatSize(item.media.size))
-              .fontSize(11)
-              .fontColor('#444444')
-          }
-        }
-
-        // 第二行：标题（BodyLarge 16fp，最多 2 行）
-        Text(item.title ?? '')
-          .fontSize(16)
-          .fontWeight(FontWeight.Normal)
-          .fontColor(item.isPlayed() ? '#444444' : '#000000')
-          .maxLines(2)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .margin({ top: 4 })
-
-        // 第三行：进度条 或 时长
-        if (item.media !== null && item.media.position > 0 && item.media.duration > 0) {
-          Row() {
-            Text(this.formatTime(item.media.position))
-              .fontSize(11)
-              .fontColor('#444444')
-            Progress({
-              value: item.media.position,
-              total: item.media.duration,
-              type: ProgressType.Linear
-            })
-              .layoutWeight(1)
-              .height(3)
-              .color('#0078C2')
-              .backgroundColor('#E0E0E0')
-              .margin({ left: 6, right: 6 })
-            Text(this.formatTime(item.media.duration))
-              .fontSize(11)
-              .fontColor('#444444')
-          }
-          .width('100%')
-          .margin({ top: 4 })
-          .alignItems(VerticalAlign.Center)
-        } else if (item.media !== null && item.media.duration > 0) {
-          Text(this.formatTime(item.media.duration))
-            .fontSize(11)
-            .fontColor('#444444')
-            .margin({ top: 4 })
-        }
-      }
-      .layoutWeight(1)
-
-      // 右侧：操作按钮（圆形描边 40vp）
-      this.actionButton(item)
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-    .alignItems(VerticalAlign.Center)
   }
 
   // ===== 右侧按钮：按状态切换（#14 精确复刻 Android）=====

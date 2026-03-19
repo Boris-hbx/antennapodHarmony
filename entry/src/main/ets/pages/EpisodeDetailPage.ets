@@ -1,12 +1,14 @@
 ﻿import { router, promptAction } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { Feed, FeedItem, FeedMedia, TAG_QUEUE, TAG_FAVORITE,
-  EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, DOWNLOAD_COMPLETE } from 'common';
-import type { QueueUpdateData, DownloadCompleteData } from 'common';
+  EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE, DOWNLOAD_ERROR } from 'common';
+import type { QueueUpdateData, DownloadProgressData, DownloadCompleteData, DownloadErrorData } from 'common';
 import { getFeedItem, getFeed, addQueueItem, removeQueueItem,
-  addFavoriteItem, removeFavoriteItem } from 'datastore';
-import { downloadNow } from 'network';
+  addFavoriteItem, removeFavoriteItem, markItemPlayed } from 'datastore';
+import { PlayState } from 'common';
+import { downloadNow, requestProgressUpdate } from 'network';
 import { getController } from '../entryability/EntryAbility';
+import { EpisodeActionButton } from '../components/EpisodeActionButton';
 
 /**
  * 单集详情页 — 显示 show notes + 操作按钮
@@ -19,14 +21,33 @@ struct EpisodeDetailPage {
   @State isFav: boolean = false;
   @State isQueued: boolean = false;
   @State isDownloaded: boolean = false;
+  @State isPlayed: boolean = false;
+  @State isLoading: boolean = true;
+  @State downloadingUrls: Map<string, number> = new Map();
 
   private itemId: number = 0;
 
+  private onDownloadProgress: (data: DownloadProgressData) => void = (data: DownloadProgressData) => {
+    for (const entry of data.urls.entries()) {
+      this.downloadingUrls.set(entry[0], entry[1]);
+    }
+    this.downloadingUrls = new Map(this.downloadingUrls);
+  };
+
   private onDownloadComplete: (data: DownloadCompleteData) => void = () => {
-    // 下载完成后重新加载，刷新下载状态和 localFileUrl
+    // 下载完成：清除标记 + 从 DB 重新加载
+    this.downloadingUrls = new Map();
     if (this.itemId > 0) {
       this.loadItem(this.itemId);
     }
+  };
+
+  private onDownloadError: (data: DownloadErrorData) => void = (data: DownloadErrorData) => {
+    this.downloadingUrls = new Map();
+    promptAction.showToast({
+      message: `下载失败: ${data.episodeTitle} (${data.errorType})`,
+      duration: 3000
+    });
   };
 
   aboutToAppear(): void {
@@ -35,78 +56,113 @@ struct EpisodeDetailPage {
       this.itemId = params['itemId'] as number ?? 0;
       this.loadItem(this.itemId);
     }
+    EventBus.on<DownloadProgressData>(DOWNLOAD_PROGRESS, this.onDownloadProgress);
     EventBus.on<DownloadCompleteData>(DOWNLOAD_COMPLETE, this.onDownloadComplete);
+    EventBus.on<DownloadErrorData>(DOWNLOAD_ERROR, this.onDownloadError);
+    requestProgressUpdate();
   }
 
   aboutToDisappear(): void {
+    EventBus.off(DOWNLOAD_PROGRESS, this.onDownloadProgress);
     EventBus.off(DOWNLOAD_COMPLETE, this.onDownloadComplete);
+    EventBus.off(DOWNLOAD_ERROR, this.onDownloadError);
   }
 
   async loadItem(itemId: number): Promise<void> {
+    this.isLoading = true;
     this.item = await getFeedItem(itemId);
     if (this.item !== null) {
       this.feed = await getFeed(this.item.feedId);
       this.isFav = this.item.isFavorite();
       this.isQueued = this.item.isQueued();
       this.isDownloaded = this.item.isDownloaded();
+      this.isPlayed = this.item.isPlayed();
       if (this.feed !== null) {
         this.item.setFeedImageUrl(this.feed.imageUrl);
       }
     }
+    this.isLoading = false;
   }
 
   build() {
     Column() {
       // 顶部导航
       Row() {
-        Button('←')
-          .type(ButtonType.Circle)
-          .width(40)
-          .height(40)
-          .backgroundColor('transparent')
-          .fontColor('#333')
-          .fontSize(20)
-          .onClick(() => { router.back(); })
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.chevron_left'))
+            .fontSize(22)
+            .fontColor(['#333333'])
+        }
+        .width(40).height(40)
+        .onClick(() => { router.back(); })
+
         Text(this.item?.title ?? '单集详情')
           .fontSize(16)
           .fontWeight(FontWeight.Bold)
           .layoutWeight(1)
-          .margin({ left: 8 })
+          .margin({ left: 4 })
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+        // ⋮ 菜单
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.dot_grid_2x2'))
+            .fontSize(18)
+            .fontColor(['#333333'])
+        }
+        .width(40).height(40)
+        .bindMenu([
+          {
+            value: this.isPlayed ? '标记为未播' : '标记为已播',
+            action: () => { this.togglePlayed(); }
+          }
+        ])
       }
       .width('100%')
       .height(56)
-      .padding({ left: 8, right: 16 })
+      .padding({ left: 8, right: 8 })
 
-      if (this.item !== null) {
+      if (this.isLoading) {
+        Column() {
+          LoadingProgress().width(40).height(40)
+          Text('加载中...').fontSize(14).fontColor('#444444').margin({ top: 8 })
+        }
+        .width('100%')
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
+      } else if (this.item !== null) {
         Scroll() {
           Column() {
             // 封面 + 信息
             Row() {
               if ((this.item!.getImageLocation() ?? '').length > 0) {
                 Image(this.item!.getImageLocation()!)
-                  .width(100)
-                  .height(100)
-                  .borderRadius(10)
+                  .width(80)
+                  .height(80)
+                  .borderRadius(8)
                   .objectFit(ImageFit.Cover)
+                  .onClick(() => { this.goToFeed(); })
               } else {
                 Column() {
-                  Text('🎙️')
-                    .fontSize(36)
+                  SymbolGlyph($r('sys.symbol.mic'))
+                    .fontSize(30)
+                    .fontColor(['#AAAAAA'])
                 }
-                .width(100)
-                .height(100)
-                .borderRadius(10)
+                .width(80)
+                .height(80)
+                .borderRadius(8)
                 .backgroundColor('#F0F0F0')
                 .justifyContent(FlexAlign.Center)
+                .onClick(() => { this.goToFeed(); })
               }
 
               Column() {
                 Text(this.feed?.getTitle() ?? '')
                   .fontSize(14)
-                  .fontColor('#444444')
+                  .fontColor('#0078C2')
                   .maxLines(1)
+                  .onClick(() => { this.goToFeed(); })
                 Row() {
                   if (this.item!.pubDate !== null) {
                     Text(this.formatDate(this.item!.pubDate!))
@@ -163,22 +219,20 @@ struct EpisodeDetailPage {
                   }
                 })
 
-              // 下载
-              Button(this.isDownloaded ? '✓ 已下载' : '↓ 下载')
-                .type(ButtonType.Normal)
-                .height(36)
-                .fontSize(13)
-                .fontColor(this.isDownloaded ? '#4CAF50' : '#0078C2')
-                .backgroundColor(this.isDownloaded ? '#E8F5E9' : '#E3F2FD')
-                .borderRadius(18)
+              // 下载 / 播放统一按钮
+              EpisodeActionButton({
+                itemId: this.item!.id,
+                downloadUrl: this.item!.media?.downloadUrl ?? '',
+                isItemDownloaded: this.isDownloaded,
+                feedId: this.item!.feedId,
+                feedTitle: this.feed !== null ? (this.feed!.getTitle() ?? '') : '',
+                filesDir: getContext(this).filesDir,
+                itemTitle: this.item!.title ?? '',
+                downloadProgress: this.downloadingUrls.has(this.item!.media?.downloadUrl ?? '')
+                  ? (this.downloadingUrls.get(this.item!.media?.downloadUrl ?? '') ?? -1)
+                  : -1,
+              })
                 .margin({ left: 8 })
-                .onClick(() => {
-                  if (!this.isDownloaded && this.item!.media !== null) {
-                    const feedTitle = this.feed !== null ? (this.feed!.getTitle() ?? '') : '';
-                    downloadNow(this.item!, feedTitle, getContext(this).filesDir);
-                    promptAction.showToast({ message: '开始下载', duration: 1500 });
-                  }
-                })
 
               // 队列
               Button(this.isQueued ? '✓ 队列' : '+ 队列')
@@ -246,6 +300,23 @@ struct EpisodeDetailPage {
     }
     .width('100%')
     .height('100%')
+  }
+
+  private goToFeed(): void {
+    if (this.item !== null) {
+      router.pushUrl({
+        url: 'pages/EpisodeListPage',
+        params: { feedId: this.item.feedId, feedTitle: this.feed?.getTitle() ?? '' }
+      });
+    }
+  }
+
+  private async togglePlayed(): Promise<void> {
+    if (this.item === null) return;
+    const newState = this.isPlayed ? PlayState.UNPLAYED : PlayState.PLAYED;
+    await markItemPlayed(this.item.id, newState);
+    this.isPlayed = !this.isPlayed;
+    promptAction.showToast({ message: this.isPlayed ? '已标记为已播' : '已标记为未播', duration: 1500 });
   }
 
   shareEpisode(): void {

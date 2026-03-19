@@ -1,14 +1,18 @@
 import { promptAction } from '@kit.ArkUI';
 import { pasteboard } from '@kit.BasicServicesKit';
-import { FeedItem, FeedMedia, EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, FEED_ITEM_UPDATE } from 'common';
+import { FeedItem, FeedMedia, EventBus, QUEUE_UPDATE, FAVORITES_UPDATE, FEED_ITEM_UPDATE,
+  DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE } from 'common';
+import type { QueueUpdateData, DownloadProgressData, DownloadCompleteData } from 'common';
 import { getController } from '../entryability/EntryAbility';
-import type { QueueUpdateData } from 'common';
+import { EpisodeActionButton } from '../components/EpisodeActionButton';
+import { requestProgressUpdate } from 'network';
 import {
   getQueue, getFeedItem, removeQueueItem, moveQueueItem, clearQueue,
   markItemPlayed, addFavoriteItem, removeFavoriteItem, deleteFeedMediaOfItem,
   isQueueLocked, setQueueLocked
 } from 'datastore';
 import { PlayState, TAG_FAVORITE } from 'common';
+import { LongPressHelper } from '../utils/LongPressHelper';
 
 /**
  * 播放队列页面 — Task-031: 队列锁定功能
@@ -20,11 +24,25 @@ export struct QueuePage {
   @State isMultiSelect: boolean = false;
   @State selectedIds: number[] = [];
   @State locked: boolean = false; // Task-031: 队列锁定
+  @State downloadingUrls: Map<string, number> = new Map();
   @State showItemMenu: boolean = false;
   @State selectedItem: FeedItem | null = null;
   @State selectedIndex: number = -1;
+  private lp = new LongPressHelper();
 
   private queueCallback: (data: QueueUpdateData) => void = () => {
+    this.loadQueue();
+  };
+
+  private onDownloadProgress: (data: DownloadProgressData) => void = (data: DownloadProgressData) => {
+    for (const entry of data.urls.entries()) {
+      this.downloadingUrls.set(entry[0], entry[1]);
+    }
+    this.downloadingUrls = new Map(this.downloadingUrls);
+  };
+
+  private onDownloadComplete: (data: DownloadCompleteData) => void = () => {
+    this.downloadingUrls = new Map();
     this.loadQueue();
   };
 
@@ -32,10 +50,15 @@ export struct QueuePage {
     this.locked = isQueueLocked();
     this.loadQueue();
     EventBus.on<QueueUpdateData>(QUEUE_UPDATE, this.queueCallback);
+    EventBus.on<DownloadProgressData>(DOWNLOAD_PROGRESS, this.onDownloadProgress);
+    EventBus.on<DownloadCompleteData>(DOWNLOAD_COMPLETE, this.onDownloadComplete);
+    requestProgressUpdate();
   }
 
   aboutToDisappear(): void {
     EventBus.off(QUEUE_UPDATE, this.queueCallback);
+    EventBus.off(DOWNLOAD_PROGRESS, this.onDownloadProgress);
+    EventBus.off(DOWNLOAD_COMPLETE, this.onDownloadComplete);
   }
 
   async loadQueue(): Promise<void> {
@@ -148,46 +171,16 @@ export struct QueuePage {
                 .alignItems(HorizontalAlign.Start)
 
                 if (!this.isMultiSelect) {
-                  Stack() {
-                    if (item.isDownloaded()) {
-                      Progress({ value: 100, type: ProgressType.Ring })
-                        .width(40)
-                        .height(40)
-                        .color('#000000')
-                        .style({ strokeWidth: 3 })
-                      SymbolGlyph($r('sys.symbol.play_fill'))
-                        .fontSize(18)
-                        .fontColor(['#000000'])
-                    } else {
-                      Progress({ value: 0, type: ProgressType.Ring })
-                        .width(40)
-                        .height(40)
-                        .color('#000000')
-                        .style({ strokeWidth: 1 })
-                      SymbolGlyph($r('sys.symbol.arrow_down'))
-                        .fontSize(18)
-                        .fontColor(['#444444'])
-                    }
-                  }
-                  .width(48)
-                  .height(48)
-                  .onClick(async () => {
-                    try {
-                      const freshItem = await getFeedItem(item.id);
-                      if (freshItem !== null && freshItem.media !== null) {
-                        if (freshItem.isDownloaded()) {
-                          await getController().playMedia(freshItem.media, freshItem.feedId, false);
-                        } else {
-                          await getController().playMedia(freshItem.media, freshItem.feedId, true);
-                        }
-                        promptAction.showToast({ message: '正在播放', duration: 1500 });
-                      } else {
-                        promptAction.showToast({ message: '该单集无媒体文件', duration: 3000 });
-                      }
-                    } catch (e) {
-                      const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
-                      promptAction.showToast({ message: '播放失败: ' + msg, duration: 3000 });
-                    }
+                  EpisodeActionButton({
+                    itemId: item.id,
+                    downloadUrl: item.media?.downloadUrl ?? '',
+                    isItemDownloaded: item.isDownloaded(),
+                    feedId: item.feedId,
+                    feedTitle: '',
+                    filesDir: getContext(this).filesDir,
+                    itemTitle: item.title ?? '',
+                    downloadProgress: this.downloadingUrls.has(item.media?.downloadUrl ?? '') ? (this.downloadingUrls.get(item.media?.downloadUrl ?? '') ?? 0) : -1,
+                    isCurrentPlaying: false
                   })
 
                   // 移除按钮 — 锁定时禁用
@@ -207,6 +200,18 @@ export struct QueuePage {
               .width('100%')
               .padding({ left: 12, right: 0, top: 8, bottom: 8 })
               .alignItems(VerticalAlign.Center)
+              .onTouch((e: TouchEvent) => {
+                this.lp.onTouch(e, () => {
+                  this.selectedItem = item;
+                  this.selectedIndex = index;
+                  this.showItemMenu = true;
+                });
+              })
+              .onClick(() => {
+                if (!this.lp.fired && this.isMultiSelect) {
+                  this.toggleSelection(item.id);
+                }
+              })
             }
             .swipeAction({
               end: this.locked ? undefined : {
@@ -215,22 +220,6 @@ export struct QueuePage {
                 }
               }
             })
-            .gesture(
-              GestureGroup(GestureMode.Exclusive,
-                LongPressGesture({ repeat: false })
-                  .onAction(() => {
-                    this.selectedItem = item;
-                    this.selectedIndex = index;
-                    this.showItemMenu = true;
-                  }),
-                TapGesture()
-                  .onAction(() => {
-                    if (this.isMultiSelect) {
-                      this.toggleSelection(item.id);
-                    }
-                  })
-              )
-            )
           }, (item: FeedItem) => item.id.toString())
         }
         .width('100%')

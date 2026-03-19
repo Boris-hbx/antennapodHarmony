@@ -4,7 +4,6 @@
     "pages/EpisodeListPage",
     "pages/EpisodeDetailPage",
     "pages/AddFeedPage",
-    "pages/FullPlayerPage",
     "pages/DownloadsPage",
     "pages/HistoryPage",
     "pages/StatisticsPage",
@@ -19,6 +18,8 @@
     "pages/SettingsSyncPage",
     "pages/SettingsBackupPage",
     "pages/SettingsNotificationsPage",
-    "pages/TagManagementPage"
+    "pages/TagManagementPage",
+    "pages/FullPlayerPage",
+    "pages/DownloadLogPage"
   ]
 }

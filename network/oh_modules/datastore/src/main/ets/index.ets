@@ -29,7 +29,7 @@ export {
   markItemPlayed, addQueueItem, removeQueueItem, moveQueueItem, clearQueue,
   addFavoriteItem, removeFavoriteItem, addItemToPlaybackHistory,
   setFeedMediaPlaybackInfo, setFeedMediaDownloadInfo, deleteFeedMediaOfItem,
-  setFeedItemsFilter, setFeedItemSortOrder
+  setFeedItemsFilter, setFeedItemSortOrder, addDownloadLog
 } from './database/DBWriter';
 
 // 偏好设置 — UserPreferences
@@ -59,6 +59,10 @@ export {
   isBottomNavigation, setBottomNavigation,
   isShowTimeLeft, setShowTimeLeft,
   isEpisodeCover, setEpisodeCover,
+  isAmoledBlack, setAmoledBlack,
+  isTimeRespectSpeed, setTimeRespectSpeed,
+  getGlobalSortOrder, setGlobalSortOrder,
+  getDownloadButtonAction, setDownloadButtonAction,
   getSleepTimerLastValue, setSleepTimerLastValue,
   getSleepTimerLastValueEpisodes, setSleepTimerLastValueEpisodes,
   getSleepTimerType, setSleepTimerType,
@@ -67,7 +71,14 @@ export {
   getSleepTimerAutoEnableFrom, setSleepTimerAutoEnableFrom,
   getSleepTimerAutoEnableTo, setSleepTimerAutoEnableTo,
   getHomeSectionOrder, setHomeSectionOrder,
-  isQueueLocked, setQueueLocked
+  isQueueLocked, setQueueLocked,
+  isAllowMobileAutoDownload, setAllowMobileAutoDownload,
+  isEnableAutodownloadOnBattery, setEnableAutodownloadOnBattery,
+  shouldPauseForFocusLoss, setShouldPauseForFocusLoss,
+  getNotifyNewEpisodes, setNotifyNewEpisodes,
+  getNotifyDownloadComplete, setNotifyDownloadComplete,
+  getNotifyDownloadError, setNotifyDownloadError,
+  getNotifySyncError, setNotifySyncError
 } from './preferences/UserPreferences';
 
 // 偏好设置 — PlaybackPreferences
@@ -81,3 +92,6 @@ export {
 // OPML 导入/导出
 export { exportOpml, parseOpml } from './importexport/OpmlHelper';
 export type { OpmlItem } from './importexport/OpmlHelper';
+
+// 数据库导出/导入
+export { exportDatabase, importDatabase } from './importexport/DatabaseExporter';

@@ -5,10 +5,14 @@ import type { PlaybackPositionData } from 'common';
 import {
   getFeed, getFeedItem, getNextInQueue, removeQueueItem,
   setFeedMediaPlaybackInfo, writeMediaPlaying, writeNoMediaPlaying,
-  getPlaybackSpeed, getFastForwardSecs, getRewindSecs
+  getPlaybackSpeed, getFastForwardSecs, getRewindSecs,
+  shouldPauseForFocusLoss
 } from 'datastore';
 import { AVPlayerWrapper } from './AVPlayerWrapper';
 import { PlayerStatus } from './PlayerStatus';
+import { AudioFocusManager } from './AudioFocusManager';
+import { AudioDeviceManager } from './AudioDeviceManager';
+import { SystemEventManager } from './SystemEventManager';
 import { startBackgroundPlayback, stopBackgroundPlayback } from './BackgroundPlayback';
 import { calculateRewindPosition } from './RewindAfterPause';
 import { SleepTimer } from './SleepTimer';
@@ -35,7 +39,12 @@ export class PlaybackController {
   private positionSaveTimer: number = -1;
   private pausedAt: number = 0; // 暂停时间戳，用于暂停回退
   private transientPause: boolean = false; // 音频焦点打断标记
+  private transientPauseTimer: number = -1; // 30秒超时定时器
   private isSkipping: boolean = false; // BUG-5: 防止并发 skip
+  private audioFocus: AudioFocusManager = new AudioFocusManager();
+  private audioDevice: AudioDeviceManager = new AudioDeviceManager();
+  private systemEvents: SystemEventManager = new SystemEventManager();
+  private deviceTransientPause: boolean = false; // 耳机断开导致的暂停
   private sleepTimer: SleepTimer = new SleepTimer();
 
   /**
@@ -58,15 +67,97 @@ export class PlaybackController {
     const cb: SessionCallbacks = {
       play: () => this.resume(),
       pause: () => this.pause(),
+      stop: () => this.pause(),
       seek: (timeMs: number) => this.seekTo(timeMs),
       fastForward: () => this.seekDelta(getFastForwardSecs() * 1000),
       rewind: () => this.seekDelta(-getRewindSecs() * 1000),
-      playNext: () => this.skip()
+      playNext: () => this.seekDelta(getFastForwardSecs() * 1000),
+      playPrevious: () => this.seekDelta(-getRewindSecs() * 1000),
+      setSpeed: (speed: number) => this.engine.setSpeed(speed)
     };
     setSessionCallbacks(cb);
 
-    // 音频焦点由 AVPlayer 内部管理（HarmonyOS AVPlayer 自动处理 interrupt）
-    // 耳机/蓝牙断开暂停由 AVPlayer stateChange 触发
+    // 音频焦点管理
+    this.audioFocus.onPause = () => {
+      // 短暂失焦（来电等）→ 静默暂停 + 30秒超时
+      if (this.engine.isPlaying()) {
+        this.engine.pause();
+        this.transientPause = true;
+        this.transientPauseTimer = setTimeout(() => {
+          // 30秒内未恢复 → 走完整暂停流程
+          if (this.transientPause) {
+            this.transientPause = false;
+            this.pause();
+          }
+        }, 30000);
+      }
+    };
+    this.audioFocus.onResume = () => {
+      // 焦点恢复
+      if (this.transientPauseTimer >= 0) {
+        clearTimeout(this.transientPauseTimer);
+        this.transientPauseTimer = -1;
+      }
+      if (this.transientPause) {
+        this.transientPause = false;
+        this.engine.play();
+      }
+    };
+    this.audioFocus.onDuck = () => {
+      // 降低音量或暂停
+      if (shouldPauseForFocusLoss()) {
+        // 走暂停流程
+        if (this.engine.isPlaying()) {
+          this.engine.pause();
+          this.transientPause = true;
+        }
+      } else {
+        this.engine.setVolume(0.25);
+      }
+    };
+    this.audioFocus.onUnduck = () => {
+      this.engine.setVolume(1.0);
+    };
+    this.audioFocus.onStop = () => {
+      // 永久失焦 → 完整暂停
+      this.pause();
+    };
+    this.audioFocus.init();
+
+    // 音频设备变化监听（耳机/蓝牙）
+    this.audioDevice.onDeviceDisconnect = () => {
+      if (AudioDeviceManager.shouldPauseOnDisconnect() && this.engine.isPlaying()) {
+        this.deviceTransientPause = true;
+        this.pause();
+      }
+    };
+    this.audioDevice.onDeviceConnect = (isBluetooth: boolean) => {
+      if (this.deviceTransientPause && AudioDeviceManager.shouldResumeOnConnect(isBluetooth)) {
+        this.deviceTransientPause = false;
+        this.resume();
+        if (isBluetooth) {
+          AudioDeviceManager.vibrateForBluetooth();
+        }
+      }
+    };
+    this.audioDevice.init();
+
+    // 系统事件监听（网络/充电）
+    this.systemEvents.onNetworkAvailable = () => {
+      console.info('PlaybackController: Network available → check auto download');
+      // 自动下载由 EntryAbility 或 UI 层触发，这里只做日志
+      // 真正的自动下载需要访问 filesDir，在 PlaybackController 无法直接调用
+    };
+    this.systemEvents.onNetworkLost = () => {
+      console.info('PlaybackController: Network lost');
+    };
+    this.systemEvents.onChargingStart = () => {
+      console.info('PlaybackController: Charging started');
+    };
+    this.systemEvents.onChargingStop = () => {
+      console.info('PlaybackController: Charging stopped');
+    };
+    this.systemEvents.init();
   }
 
   /**
@@ -75,7 +166,13 @@ export class PlaybackController {
   async release(): Promise<void> {
     this.stopPositionSaveTimer();
     await this.savePosition();
-    // 音频焦点由 AVPlayer 内部管理
+    this.audioFocus.release();
+    this.audioDevice.release();
+    this.systemEvents.release();
+    if (this.transientPauseTimer >= 0) {
+      clearTimeout(this.transientPauseTimer);
+      this.transientPauseTimer = -1;
+    }
     await this.engine.release();
     await releaseSession();
     if (this.context !== null) {
@@ -283,6 +380,10 @@ export class PlaybackController {
 
   getCurrentMedia(): FeedMedia | null {
     return this.currentMedia;
+  }
+
+  getSystemEventManager(): SystemEventManager {
+    return this.systemEvents;
   }
 
   getCurrentItem(): FeedItem | null {

@@ -15,7 +15,9 @@ import {
   COL_FEED_PLAYBACK_SPEED, COL_FEED_SKIP_SILENCE, COL_FEED_VOLUME_ADAPTION,
   COL_TAGS, COL_FEED_SKIP_INTRO, COL_FEED_SKIP_ENDING, COL_EPISODE_NOTIFICATION,
   COL_NEW_EPISODES_ACTION, COL_INCLUDE_FILTER, COL_EXCLUDE_FILTER,
-  COL_MINIMAL_DURATION_FILTER, COL_USERNAME, COL_PASSWORD
+  COL_MINIMAL_DURATION_FILTER, COL_USERNAME, COL_PASSWORD,
+  COL_FEEDFILE, COL_FEEDFILE_TYPE, COL_REASON, COL_SUCCESSFUL,
+  COL_COMPLETION_DATE, COL_REASON_DETAILED
 } from './PodDBAdapter';
 import {
   feedToValuesBucket, feedItemToValuesBucket, feedMediaToValuesBucket, chapterToValuesBucket
@@ -617,5 +619,31 @@ export async function setFeedItemSortOrder(feedId: number, sortOrder: SortOrder 
       sort_order: sortOrder !== null ? sortOrder.toString() : null
     };
     await db.update(bucket, pred);
+  });
+}
+
+/**
+ * 添加下载日志
+ */
+export async function addDownloadLog(feedFile: number, feedFileType: number,
+  reason: number, successful: boolean, reasonDetailed: string, title: string): Promise<void> {
+  await enqueueWrite(async () => {
+    const db = getDatabaseSync();
+    const bucket: relationalStore.ValuesBucket = {
+      feedfile: feedFile,
+      feedfiletype: feedFileType,
+      reason: reason,
+      successful: successful ? 1 : 0,
+      completion_date: Date.now(),
+      reason_detailed: reasonDetailed,
+      title: title
+    };
+    await db.insert(TABLE_DOWNLOAD_LOG, bucket);
+
+    // 只保留最新 200 条记录
+    await db.executeSql(
+      `DELETE FROM ${TABLE_DOWNLOAD_LOG} WHERE ${COL_ID} NOT IN ` +
+      `(SELECT ${COL_ID} FROM ${TABLE_DOWNLOAD_LOG} ORDER BY ${COL_ID} DESC LIMIT 200)`
+    );
   });
 }

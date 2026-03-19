@@ -1,6 +1,7 @@
 import { router, promptAction } from '@kit.ArkUI';
 import { fileIo } from '@kit.CoreFileKit';
-import { getFeedList, exportOpml, parseOpml, addOrUpdateFeed } from 'datastore';
+import { getFeedList, exportOpml, parseOpml, addOrUpdateFeed,
+  exportDatabase, importDatabase } from 'datastore';
 import { Feed, EventBus, FEED_LIST_UPDATE } from 'common';
 import type { FeedListUpdateData } from 'common';
 
@@ -51,14 +52,18 @@ struct SettingsBackupPage {
 
         ListItem() {
           this.actionRow('导出数据库', '完整备份所有数据（订阅、单集、播放进度）', 'sys.symbol.arrow_up_doc')
-        }.onClick(() => {
-          promptAction.showToast({ message: '数据库备份功能即将推出', duration: 1500 });
-        })
+        }.onClick(() => { this.doDbExport(); })
 
         ListItem() {
           this.actionRow('导入数据库', '从备份文件恢复所有数据', 'sys.symbol.arrow_down_doc')
+        }.onClick(() => { this.confirmDbImport(); })
+
+        // 下载日志入口
+        ListItem() { this.sectionHeader('日志') }
+        ListItem() {
+          this.actionRow('下载日志', '查看下载历史记录', 'sys.symbol.list_bullet')
         }.onClick(() => {
-          promptAction.showToast({ message: '数据库恢复功能即将推出', duration: 1500 });
+          router.pushUrl({ url: 'pages/DownloadLogPage' });
         })
       }
       .width('100%')
@@ -151,6 +156,61 @@ struct SettingsBackupPage {
       }
       EventBus.emit<FeedListUpdateData>(FEED_LIST_UPDATE, { feedIds: [] });
       promptAction.showToast({ message: `已导入 ${imported} 个订阅`, duration: 2000 });
+    } catch (e) {
+      const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
+      promptAction.showToast({ message: '导入失败: ' + msg, duration: 2000 });
+    }
+  }
+
+  // ===== 数据库导出/导入 =====
+
+  async doDbExport(): Promise<void> {
+    try {
+      const ctx = getContext(this);
+      const path = await exportDatabase(ctx);
+      promptAction.showToast({ message: `备份已保存到:\n${path}`, duration: 3000 });
+    } catch (e) {
+      const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
+      promptAction.showToast({ message: '备份失败: ' + msg, duration: 2000 });
+    }
+  }
+
+  confirmDbImport(): void {
+    AlertDialog.show({
+      title: '导入数据库',
+      message: '导入将覆盖当前所有数据（订阅、播放进度、队列、收藏）。\n\n确定继续？',
+      primaryButton: { value: '取消', action: () => {} },
+      secondaryButton: {
+        value: '确定导入',
+        fontColor: '#F44336',
+        action: () => { this.doDbImport(); }
+      }
+    });
+  }
+
+  async doDbImport(): Promise<void> {
+    try {
+      const ctx = getContext(this);
+      // 从沙箱 backup 目录查找最新的备份文件
+      const backupDir = ctx.filesDir + '/backup';
+      const files = fileIo.listFileSync(backupDir);
+      const dbFiles = files.filter((f: string) => f.endsWith('.db'));
+      if (dbFiles.length === 0) {
+        promptAction.showToast({ message: '未找到备份文件，请先导出', duration: 2000 });
+        return;
+      }
+      // 取最新的（按名称排序，日期在文件名中）
+      dbFiles.sort();
+      const latestFile = dbFiles[dbFiles.length - 1];
+      const sourcePath = backupDir + '/' + latestFile;
+
+      await importDatabase(ctx, sourcePath);
+
+      AlertDialog.show({
+        title: '导入成功',
+        message: '数据库已恢复。请手动关闭并重新打开应用以使更改生效。',
+        primaryButton: { value: '知道了', action: () => {} }
+      });
     } catch (e) {
       const msg = (e instanceof Error) ? e.message : JSON.stringify(e);
       promptAction.showToast({ message: '导入失败: ' + msg, duration: 2000 });

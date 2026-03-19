@@ -298,6 +298,48 @@ export async function setEpisodeCover(enabled: boolean): Promise<void> {
   await prefs.flush();
 }
 
+// ===== 6.3.1 新增 UI 设置 =====
+
+export function isAmoledBlack(): boolean {
+  return getDefault().getSync('prefAmoledBlack', false) as boolean;
+}
+
+export async function setAmoledBlack(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefAmoledBlack', enabled);
+  await prefs.flush();
+}
+
+export function isTimeRespectSpeed(): boolean {
+  return getDefault().getSync('prefTimeRespectSpeed', false) as boolean;
+}
+
+export async function setTimeRespectSpeed(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefTimeRespectSpeed', enabled);
+  await prefs.flush();
+}
+
+export function getGlobalSortOrder(): string {
+  return getDefault().getSync('prefGlobalSortOrder', 'DATE_NEW_OLD') as string;
+}
+
+export async function setGlobalSortOrder(order: string): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefGlobalSortOrder', order);
+  await prefs.flush();
+}
+
+export function getDownloadButtonAction(): string {
+  return getDefault().getSync('prefDownloadButtonAction', 'ALWAYS_DOWNLOAD') as string;
+}
+
+export async function setDownloadButtonAction(action: string): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefDownloadButtonAction', action);
+  await prefs.flush();
+}
+
 // ===== 6.5 睡眠定时器设置 =====
 
 export function getSleepTimerLastValue(): number {
@@ -402,5 +444,81 @@ export function isQueueLocked(): boolean {
 export async function setQueueLocked(locked: boolean): Promise<void> {
   const prefs = getDefault();
   prefs.putSync('prefQueueLocked', locked);
+  await prefs.flush();
+}
+
+// ===== 6.7.1 自动下载网络/充电偏好 =====
+
+export function isAllowMobileAutoDownload(): boolean {
+  return getDefault().getSync('prefAllowMobileAutoDownload', false) as boolean;
+}
+
+export async function setAllowMobileAutoDownload(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefAllowMobileAutoDownload', enabled);
+  await prefs.flush();
+}
+
+export function isEnableAutodownloadOnBattery(): boolean {
+  return getDefault().getSync('prefAutodownloadOnBattery', true) as boolean;
+}
+
+export async function setEnableAutodownloadOnBattery(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefAutodownloadOnBattery', enabled);
+  await prefs.flush();
+}
+
+// ===== 6.7.2 音频焦点偏好 =====
+
+export function shouldPauseForFocusLoss(): boolean {
+  return getDefault().getSync('prefPauseForFocusLoss', true) as boolean;
+}
+
+export async function setShouldPauseForFocusLoss(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefPauseForFocusLoss', enabled);
+  await prefs.flush();
+}
+
+// ===== 6.8 通知设置 =====
+
+export function getNotifyNewEpisodes(): boolean {
+  return getDefault().getSync('prefNotifyNewEpisodes', true) as boolean;
+}
+
+export async function setNotifyNewEpisodes(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefNotifyNewEpisodes', enabled);
+  await prefs.flush();
+}
+
+export function getNotifyDownloadComplete(): boolean {
+  return getDefault().getSync('prefNotifyDownloadComplete', true) as boolean;
+}
+
+export async function setNotifyDownloadComplete(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefNotifyDownloadComplete', enabled);
+  await prefs.flush();
+}
+
+export function getNotifyDownloadError(): boolean {
+  return getDefault().getSync('prefNotifyDownloadError', true) as boolean;
+}
+
+export async function setNotifyDownloadError(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefNotifyDownloadError', enabled);
+  await prefs.flush();
+}
+
+export function getNotifySyncError(): boolean {
+  return getDefault().getSync('prefNotifySyncError', true) as boolean;
+}
+
+export async function setNotifySyncError(enabled: boolean): Promise<void> {
+  const prefs = getDefault();
+  prefs.putSync('prefNotifySyncError', enabled);
   await prefs.flush();
 }

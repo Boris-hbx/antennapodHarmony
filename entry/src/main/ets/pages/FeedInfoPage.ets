@@ -4,6 +4,7 @@ import { Feed, FeedItem, FeedItemFilter, PlayState,
 import { getFeed, getFeedList, getFeedItemList, deleteFeed, getStatistics } from 'datastore';
 import type { StatisticsItem } from 'datastore';
 import { pasteboard } from '@kit.BasicServicesKit';
+import { LongPressHelper } from '../utils/LongPressHelper';
 
 /**
  * Feed 信息页 — 展示播客统计、描述、URL、退订
@@ -19,6 +20,7 @@ struct FeedInfoPage {
   @State totalDuration: number = 0;
   @State diskUsage: number = 0;
   @State descExpanded: boolean = false;
+  private lp = new LongPressHelper();
 
   aboutToAppear(): void {
     const params = router.getParams() as Record<string, Object>;
@@ -74,8 +76,30 @@ struct FeedInfoPage {
 
         Blank()
 
-        // 占位，保持标题居中
-        Stack().width(40).height(40)
+        // 更多菜单
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.dot_grid_2x2'))
+            .fontSize(22)
+            .fontColor([Color.White])
+        }
+        .width(40).height(40)
+        .bindMenu([
+          {
+            value: '分享',
+            action: () => { this.copyUrl(); }
+          },
+          {
+            value: '访问网站',
+            action: () => {
+              const link = this.feed?.link ?? '';
+              if (link.length > 0) {
+                promptAction.showToast({ message: `网站地址：${link}`, duration: 3000 });
+              } else {
+                promptAction.showToast({ message: '此播客未提供网站链接', duration: 1500 });
+              }
+            }
+          }
+        ])
       }
       .width('100%')
       .height(48)
@@ -199,6 +223,11 @@ struct FeedInfoPage {
             }
             .width('100%')
             .alignItems(VerticalAlign.Center)
+            .onTouch((e: TouchEvent) => {
+              this.lp.onTouch(e, () => {
+                this.copyUrl();
+              });
+            })
           }
           .width('100%')
           .padding(16)
@@ -206,7 +235,42 @@ struct FeedInfoPage {
 
           Divider().strokeWidth(0.5).color('#E8E8E8')
 
-          // 5. 退订按钮
+          // 5. 支持此播客（仅当 feed.link 存在时显示）
+          if ((this.feed?.link ?? '').length > 0) {
+            Column() {
+              Text('支持此播客')
+                .fontSize(16)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#1A1A1A')
+                .margin({ bottom: 8 })
+
+              Row() {
+                SymbolGlyph($r('sys.symbol.heart'))
+                  .fontSize(18)
+                  .fontColor(['#FF3B30'])
+                  .margin({ right: 8 })
+
+                Text(this.feed!.link!)
+                  .fontSize(14)
+                  .fontColor('#0078C2')
+                  .maxLines(2)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis })
+                  .layoutWeight(1)
+              }
+              .width('100%')
+              .alignItems(VerticalAlign.Center)
+              .onClick(() => {
+                promptAction.showToast({ message: `链接：${this.feed!.link!}`, duration: 3000 });
+              })
+            }
+            .width('100%')
+            .padding(16)
+            .alignItems(HorizontalAlign.Start)
+
+            Divider().strokeWidth(0.5).color('#E8E8E8')
+          }
+
+          // 6. 退订按钮
           Button('退订播客')
             .type(ButtonType.Normal)
             .fontColor('#FF3B30')

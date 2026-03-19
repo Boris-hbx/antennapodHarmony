@@ -1,7 +1,9 @@
 import { router, promptAction } from '@kit.ArkUI';
-import { Feed, FeedItem, EventBus, FEED_LIST_UPDATE } from 'common';
+import { Feed, FeedItem, PlayState, EventBus, FEED_LIST_UPDATE } from 'common';
 import type { FeedListUpdateData } from 'common';
-import { searchFeeds, searchFeedItems, getFeedItemList, addOrUpdateFeed } from 'datastore';
+import { searchFeeds, searchFeedItems, getFeedItemList, addOrUpdateFeed, markItemPlayed } from 'datastore';
+import { getController } from '../entryability/EntryAbility';
+import { LongPressHelper } from '../utils/LongPressHelper';
 
 /**
  * 本地搜索页 — 搜索已订阅的 Feed 和单集
@@ -16,6 +18,15 @@ struct SearchPage {
   @State isSearching: boolean = false;
   @State hasSearched: boolean = false;
 
+  // Feed 过滤 Chip
+  @State filterFeedId: number = 0; // 0=全部
+  // 长按菜单
+  @State showContextMenu: boolean = false;
+  @State selectedItem: FeedItem | null = null;
+  private lp = new LongPressHelper();
+  // debounce
+  private debounceTimer: number = -1;
+
   // Task-023: 底部弹窗预览状态
   @State showFeedPreview: boolean = false;
   @State previewFeed: Feed | null = null;
@@ -26,25 +37,34 @@ struct SearchPage {
     if (this.query.trim().length === 0) return;
     this.isSearching = true;
     this.feedResults = await searchFeeds(this.query);
-    this.itemResults = await searchFeedItems(null, this.query);
+    const feedId = this.filterFeedId > 0 ? this.filterFeedId : null;
+    this.itemResults = await searchFeedItems(feedId, this.query);
     this.hasSearched = true;
     this.isSearching = false;
+  }
+
+  private triggerDebounce(): void {
+    if (this.debounceTimer >= 0) {
+      clearTimeout(this.debounceTimer);
+    }
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = -1;
+      this.doSearch();
+    }, 300);
   }
 
   build() {
     Column() {
       // 搜索栏
       Row() {
-        Button('←')
-          .type(ButtonType.Circle)
-          .width(40)
-          .height(40)
-          .backgroundColor('transparent')
-          .fontColor('#333')
-          .fontSize(20)
-          .onClick(() => {
-            router.back();
-          })
+        Stack({ alignContent: Alignment.Center }) {
+          SymbolGlyph($r('sys.symbol.chevron_left'))
+            .fontSize(22)
+            .fontColor(['#333333'])
+        }
+        .width(40).height(40)
+        .onClick(() => { router.back(); })
+
         Search({ value: this.query, placeholder: '搜索播客或单集' })
           .onSubmit((value: string) => {
             this.query = value;
@@ -52,6 +72,7 @@ struct SearchPage {
           })
           .onChange((value: string) => {
             this.query = value;
+            this.triggerDebounce();
           })
           .layoutWeight(1)
           .height(40)
@@ -91,11 +112,59 @@ struct SearchPage {
             .fontSize(16)
             .fontColor('#444444')
             .margin({ top: 80 })
+          // 在线搜索入口
+          Button('在线搜索播客')
+            .type(ButtonType.Normal)
+            .height(40)
+            .fontSize(14)
+            .fontColor('#FFFFFF')
+            .backgroundColor('#0078C2')
+            .borderRadius(20)
+            .margin({ top: 20 })
+            .onClick(() => {
+              router.pushUrl({ url: 'pages/AddFeedPage', params: { searchQuery: this.query } });
+            })
         }
         .width('100%')
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Center)
       } else {
+        // Feed 过滤 Chip 条
+        if (this.feedResults.length > 0 && this.itemResults.length > 0) {
+          Scroll() {
+            Row() {
+              Text('全部')
+                .fontSize(13)
+                .fontColor(this.filterFeedId === 0 ? '#FFFFFF' : '#333333')
+                .backgroundColor(this.filterFeedId === 0 ? '#0078C2' : '#F0F0F0')
+                .borderRadius(16)
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .margin({ right: 8 })
+                .onClick(() => {
+                  this.filterFeedId = 0;
+                  this.doSearch();
+                })
+              ForEach(this.feedResults, (feed: Feed) => {
+                Text(feed.getTitle() ?? '')
+                  .fontSize(13)
+                  .fontColor(this.filterFeedId === feed.id ? '#FFFFFF' : '#333333')
+                  .backgroundColor(this.filterFeedId === feed.id ? '#0078C2' : '#F0F0F0')
+                  .borderRadius(16)
+                  .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                  .margin({ right: 8 })
+                  .maxLines(1)
+                  .onClick(() => {
+                    this.filterFeedId = feed.id;
+                    this.doSearch();
+                  })
+              }, (feed: Feed) => 'chip_' + feed.id.toString())
+            }
+            .padding({ left: 16, right: 16 })
+          }
+          .scrollable(ScrollDirection.Horizontal)
+          .scrollBar(BarState.Off)
+          .height(40)
+        }
         List() {
           // 播客结果
           if (this.feedResults.length > 0) {
@@ -210,11 +279,19 @@ struct SearchPage {
                 }
                 .width('100%')
                 .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-                .onClick(() => {
-                  router.pushUrl({
-                    url: 'pages/EpisodeDetailPage',
-                    params: { itemId: item.id, feedId: item.feedId }
+                .onTouch((e: TouchEvent) => {
+                  this.lp.onTouch(e, () => {
+                    this.selectedItem = item;
+                    this.showContextMenu = true;
                   });
+                })
+                .onClick(() => {
+                  if (!this.lp.fired) {
+                    router.pushUrl({
+                      url: 'pages/EpisodeDetailPage',
+                      params: { itemId: item.id, feedId: item.feedId }
+                    });
+                  }
                 })
               }
             }, (item: FeedItem) => item.id.toString())
@@ -227,6 +304,11 @@ struct SearchPage {
     }
     .width('100%')
     .height('100%')
+    .bindSheet($$this.showContextMenu, () => { this.episodeContextMenu(); }, {
+      detents: [SheetSize.FIT_CONTENT],
+      showClose: false,
+      dragBar: true
+    })
     // Task-023: 播客预览弹窗
     .bindSheet($$this.showFeedPreview, () => { this.FeedPreviewSheet(); }, {
       detents: [SheetSize.MEDIUM, SheetSize.LARGE],
@@ -356,6 +438,51 @@ struct SearchPage {
       Blank().height(20)
     }
     .width('100%')
+  }
+
+  // ===== 长按上下文菜单 =====
+
+  @Builder
+  episodeContextMenu() {
+    Column() {
+      if (this.selectedItem !== null) {
+        Text(this.selectedItem!.title ?? '')
+          .fontSize(16).fontWeight(FontWeight.Bold).maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%').padding({ left: 20, right: 20, top: 16, bottom: 12 })
+      }
+      Divider().strokeWidth(0.5).color('#E8E8E8')
+      this.ctxMenuItem('播放', $r('sys.symbol.play_fill'), () => {
+        if (this.selectedItem !== null && this.selectedItem!.media !== null) {
+          this.showContextMenu = false;
+          getController().playMedia(this.selectedItem!.media!, this.selectedItem!.feedId, true).catch(() => {});
+        }
+      })
+      this.ctxMenuItem('查看详情', $r('sys.symbol.info_circle'), () => {
+        if (this.selectedItem !== null) {
+          this.showContextMenu = false;
+          router.pushUrl({ url: 'pages/EpisodeDetailPage', params: { itemId: this.selectedItem!.id } });
+        }
+      })
+      this.ctxMenuItem('跳转至播客', $r('sys.symbol.music_note_list'), () => {
+        if (this.selectedItem !== null) {
+          this.showContextMenu = false;
+          router.pushUrl({ url: 'pages/EpisodeListPage', params: { feedId: this.selectedItem!.feedId } });
+        }
+      })
+      Blank().height(20)
+    }.width('100%')
+  }
+
+  @Builder
+  ctxMenuItem(label: string, icon: Resource, action: () => void) {
+    Row() {
+      SymbolGlyph(icon).fontSize(20).fontColor(['#333333']).margin({ right: 16 })
+      Text(label).fontSize(16).fontColor('#1A1A1A')
+    }
+    .width('100%').height(52).padding({ left: 20, right: 20 })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => { action(); })
   }
 
   // ===== 工具方法 =====

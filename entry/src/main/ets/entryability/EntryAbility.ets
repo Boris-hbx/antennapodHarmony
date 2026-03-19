@@ -1,12 +1,16 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { router, window } from '@kit.ArkUI';
-import { getDatabase, initUserPreferences, initPlaybackPreferences, getTheme, getUpdateInterval } from 'datastore';
+import { workScheduler } from '@kit.BackgroundTasksKit';
+import { getDatabase, initUserPreferences, initPlaybackPreferences, getTheme, getUpdateInterval,
+  isEnableAutodownloadOnBattery } from 'datastore';
 import { PlaybackController } from 'playback';
-import { refreshAllFeeds } from 'network';
+import { refreshAllFeeds, cancelAllDownloads, setDownloadLifecycleCallbacks,
+  startBackgroundDownload, stopBackgroundDownloadIfIdle } from 'network';
 import { EventBus, DOWNLOAD_COMPLETE } from 'common';
 import type { DownloadCompleteData } from 'common';
 import { sendDownloadCompleteNotification } from '../components/NotificationHelper';
+import { ensureNotificationPermission } from '../utils/PermissionHelper';
 
 const DOMAIN = 0x0000;
 
@@ -24,7 +28,7 @@ export default class EntryAbility extends UIAbility {
   private downloadCompleteCallback: (data: DownloadCompleteData) => void = (data) => {
     sendDownloadCompleteNotification(data.episodeTitle);
   };
-  private autoRefreshTimer: number = -1;
+  private static readonly WORK_ID: number = 1001;
   private servicesReady: boolean = false;
 
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
@@ -101,9 +105,56 @@ export default class EntryAbility extends UIAbility {
     // 监听下载完成事件 → 发送通知
     EventBus.on<DownloadCompleteData>(DOWNLOAD_COMPLETE, this.downloadCompleteCallback);
 
-    // 标记服务就绪 + 启动自动定时刷新
+    // 注册下载生命周期回调 → 后台保活
+    const ctx = this.context;
+    setDownloadLifecycleCallbacks(
+      () => {
+        // 下载开始 → 申请后台任务
+        startBackgroundDownload(ctx).catch(() => {});
+      },
+      () => {
+        // 下载结束 → 释放后台任务（如果没有其他活跃下载）
+        stopBackgroundDownloadIfIdle(ctx).catch(() => {});
+      }
+    );
+
+    // 标记服务就绪 + 注册 workScheduler 后台刷新 + 启动时即时刷新一次
     this.servicesReady = true;
-    this.startAutoRefresh();
+    this.registerAutoRefreshWork();
+
+    // 申请通知权限
+    ensureNotificationPermission(this.context).catch(() => {});
+
+    // 接通系统事件 → 自动下载链路
+    if (globalController !== null) {
+      const sysEvents = globalController.getSystemEventManager();
+      const filesDir = this.context.filesDir;
+      sysEvents.onNetworkAvailable = () => {
+        hilog.info(DOMAIN, 'testTag', 'Network available → triggering auto download');
+        // TODO: 调用 autodownloadUndownloadedItems(filesDir)
+      };
+      sysEvents.onNetworkLost = () => {
+        hilog.info(DOMAIN, 'testTag', 'Network lost → cancelling downloads');
+        cancelAllDownloads();
+      };
+      sysEvents.onChargingStart = () => {
+        hilog.info(DOMAIN, 'testTag', 'Charging started → triggering auto download');
+        // TODO: 调用 autodownloadUndownloadedItems(filesDir)
+      };
+      sysEvents.onChargingStop = () => {
+        hilog.info(DOMAIN, 'testTag', 'Charging stopped');
+        if (!isEnableAutodownloadOnBattery()) {
+          hilog.info(DOMAIN, 'testTag', 'Battery download disabled → cancelling downloads');
+          cancelAllDownloads();
+        }
+      };
+    }
+    // 启动时触发一次即时刷新（保留原有行为）
+    refreshAllFeeds().then(() => {
+      hilog.info(DOMAIN, 'testTag', 'Startup refresh: done');
+    }).catch((e: Error) => {
+      hilog.error(DOMAIN, 'testTag', 'Startup refresh failed: %{public}s', e.message);
+    });
 
     // 处理冷启动时的 Widget 操作
     const pendingAction = AppStorage.get<string>('pendingWidgetAction');
@@ -166,7 +217,6 @@ export default class EntryAbility extends UIAbility {
 
   onDestroy(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
-    this.stopAutoRefresh();
     EventBus.off(DOWNLOAD_COMPLETE, this.downloadCompleteCallback);
     if (globalController !== null) {
       globalController.release();
@@ -193,43 +243,53 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
-    // 回前台时重新读取刷新间隔（用户可能改了设置）
-    // 首次启动时 initServices 尚未完成，servicesReady 为 false，跳过
-    if (this.servicesReady) {
-      this.startAutoRefresh();
-    }
   }
 
   onBackground(): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
-    this.stopAutoRefresh();
   }
 
-  // ===== 自动定时刷新 =====
+  // ===== Task-032: workScheduler 系统级后台定时刷新 =====
 
-  private startAutoRefresh(): void {
-    this.stopAutoRefresh();
+  /**
+   * 注册 workScheduler 周期任务。
+   * intervalMinutes ≤ 0 表示"从不"，不注册。
+   * workScheduler 系统最小间隔约 20 分钟，短于此的值由系统自动调整。
+   */
+  private registerAutoRefreshWork(): void {
     const intervalMinutes = getUpdateInterval();
+
+    // 先停掉旧任务（不管是否存在，stopWork 对不存在的 workId 不报错）
+    const stopInfo: workScheduler.WorkInfo = {
+      workId: EntryAbility.WORK_ID,
+      bundleName: 'com.antennapod.harmony',
+      abilityName: 'FeedRefreshWorkAbility'
+    };
+    try {
+      workScheduler.stopWork(stopInfo);
+    } catch (_e) { /* 首次注册时可能不存在，忽略 */ }
+
     if (intervalMinutes <= 0) {
-      hilog.info(DOMAIN, 'testTag', 'Auto refresh disabled (interval=0)');
+      hilog.info(DOMAIN, 'testTag', 'Auto refresh disabled (interval=0), workScheduler not registered');
       return;
     }
-    const intervalMs = intervalMinutes * 60 * 1000;
-    hilog.info(DOMAIN, 'testTag', 'Auto refresh started: every %{public}d minutes', intervalMinutes);
-    this.autoRefreshTimer = setInterval(() => {
-      hilog.info(DOMAIN, 'testTag', 'Auto refresh: refreshing all feeds...');
-      refreshAllFeeds().then(() => {
-        hilog.info(DOMAIN, 'testTag', 'Auto refresh: done');
-      }).catch((e: Error) => {
-        hilog.error(DOMAIN, 'testTag', 'Auto refresh failed: %{public}s', e.message);
-      });
-    }, intervalMs);
-  }
 
-  private stopAutoRefresh(): void {
-    if (this.autoRefreshTimer >= 0) {
-      clearInterval(this.autoRefreshTimer);
-      this.autoRefreshTimer = -1;
+    const workInfo: workScheduler.WorkInfo = {
+      workId: EntryAbility.WORK_ID,
+      bundleName: 'com.antennapod.harmony',
+      abilityName: 'FeedRefreshWorkAbility',
+      isPersisted: true,
+      isRepeat: true,
+      repeatCycleTime: intervalMinutes * 60 * 1000,
+      networkType: workScheduler.NetworkType.NETWORK_TYPE_ANY
+    };
+
+    try {
+      workScheduler.startWork(workInfo);
+      hilog.info(DOMAIN, 'testTag', 'workScheduler registered: every %{public}d minutes', intervalMinutes);
+    } catch (e) {
+      const msg = (e instanceof Error) ? e.message : String(e);
+      hilog.error(DOMAIN, 'testTag', 'workScheduler registration failed: %{public}s', msg);
     }
   }
 }

@@ -1,12 +1,14 @@
 import { router, promptAction } from '@kit.ArkUI';
 import { getController } from '../entryability/EntryAbility';
+import { EpisodeActionButton } from '../components/EpisodeActionButton';
 import { Feed, FeedItem, FeedItemFilter, SortOrder,
   EventBus, FEED_LIST_UPDATE, QUEUE_UPDATE, FAVORITES_UPDATE,
   DOWNLOAD_PROGRESS, DOWNLOAD_COMPLETE } from 'common';
 import type { FeedListUpdateData, QueueUpdateData, DownloadProgressData, DownloadCompleteData } from 'common';
 import { getQueue, getEpisodes, getFeedItem, getFeedList, getFeedItemList,
   getHomeSectionOrder, setHomeSectionOrder } from 'datastore';
-import { refreshAllFeeds, getActiveDownloads } from 'network';
+import { LongPressHelper } from '../utils/LongPressHelper';
+import { refreshAllFeeds, getActiveDownloads, requestProgressUpdate } from 'network';
 import type { DownloadTask } from 'network';
 
 // Section 定义
@@ -35,6 +37,16 @@ export struct HomePage {
   @State activeTasks: DownloadTask[] = [];
   @State recentDownloads: FeedItem[] = [];
   @State isRefreshing: boolean = false;
+  @State downloadingUrls: Map<string, number> = new Map();
+
+  // 长按上下文菜单（剧集）
+  @State showContextMenu: boolean = false;
+  @State selectedEpisode: FeedItem | null = null;
+
+  // 长按上下文菜单（订阅 Feed）
+  @State showFeedContextMenu: boolean = false;
+  @State selectedFeedEntry: FeedWithCount | null = null;
+  private lp = new LongPressHelper();
 
   // Task-030: Section 排序
   @State sectionOrder: string[] = [];
@@ -45,11 +57,17 @@ export struct HomePage {
   private onFeedUpdate: (data: FeedListUpdateData) => void = () => { this.loadData(); };
   private onQueueUpdate: (data: QueueUpdateData) => void = () => { this.loadData(); };
   private onFavUpdate: () => void = () => { this.loadData(); };
-  private onDownloadProgress: (data: DownloadProgressData) => void = () => {
+  private onDownloadProgress: (data: DownloadProgressData) => void = (data: DownloadProgressData) => {
     this.activeTasks = getActiveDownloads();
+    for (const entry of data.urls.entries()) {
+      this.downloadingUrls.set(entry[0], entry[1]);
+    }
+    this.downloadingUrls = new Map(this.downloadingUrls);
   };
   private onDownloadComplete: (data: DownloadCompleteData) => void = () => {
     this.loadDownloads();
+    this.downloadingUrls = new Map();
+    this.loadData();
   };
 
   aboutToAppear(): void {
@@ -60,6 +78,7 @@ export struct HomePage {
     EventBus.on<void>(FAVORITES_UPDATE, this.onFavUpdate);
     EventBus.on<DownloadProgressData>(DOWNLOAD_PROGRESS, this.onDownloadProgress);
     EventBus.on<DownloadCompleteData>(DOWNLOAD_COMPLETE, this.onDownloadComplete);
+    requestProgressUpdate();
   }
 
   aboutToDisappear(): void {
@@ -218,6 +237,16 @@ export struct HomePage {
       detents: [SheetSize.MEDIUM],
       showClose: true
     })
+    .bindSheet($$this.showContextMenu, () => { this.contextMenuSheet(); }, {
+      detents: [SheetSize.FIT_CONTENT],
+      showClose: false,
+      dragBar: true
+    })
+    .bindSheet($$this.showFeedContextMenu, () => { this.feedContextMenuSheet(); }, {
+      detents: [SheetSize.FIT_CONTENT],
+      showClose: false,
+      dragBar: true
+    })
   }
 
   // ===== Task-030: Section 排序弹窗 =====
@@ -358,18 +387,17 @@ export struct HomePage {
                 .justifyContent(FlexAlign.Center)
               }
 
-              Button(item.isDownloaded() ? '▶' : '↓')
-                .width(48)
-                .height(48)
-                .borderRadius(24)
-                .backgroundColor('#FFFFFF')
-                .fontColor('#333333')
-                .fontSize(14)
-                .margin({ right: 8, bottom: 8 })
-                .shadow({ radius: 4, color: 'rgba(0,0,0,0.3)' })
-                .onClick(() => {
-                  this.playOrDownload(item);
-                })
+              EpisodeActionButton({
+                itemId: item.id,
+                downloadUrl: item.media?.downloadUrl ?? '',
+                isItemDownloaded: item.isDownloaded(),
+                feedId: item.feedId,
+                feedTitle: '',
+                filesDir: getContext(this).filesDir,
+                itemTitle: item.title ?? '',
+                downloadProgress: this.downloadingUrls.has(item.media?.downloadUrl ?? '') ? (this.downloadingUrls.get(item.media?.downloadUrl ?? '') ?? 0) : -1,
+                isCurrentPlaying: false
+              })
             }
 
             Text(item.title ?? '')
@@ -387,8 +415,16 @@ export struct HomePage {
               .width(128)
           }
           .margin({ right: 8 })
+          .onTouch((e: TouchEvent) => {
+            this.lp.onTouch(e, () => {
+              this.selectedEpisode = item;
+              this.showContextMenu = true;
+            });
+          })
           .onClick(() => {
-            router.pushUrl({ url: 'pages/EpisodeDetailPage', params: { itemId: item.id } });
+            if (!this.lp.fired) {
+              router.pushUrl({ url: 'pages/EpisodeDetailPage', params: { itemId: item.id } });
+            }
           })
         }, (item: FeedItem) => item.id.toString())
       }
@@ -396,6 +432,89 @@ export struct HomePage {
     }
     .scrollable(ScrollDirection.Horizontal)
     .scrollBar(BarState.Off)
+  }
+
+  @Builder
+  contextMenuSheet() {
+    Column() {
+      if (this.selectedEpisode !== null) {
+        Text(this.selectedEpisode!.title ?? '')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 16, bottom: 12 })
+      }
+      Divider().strokeWidth(0.5).color('#E8E8E8')
+      this.ctxMenuItem('播放', $r('sys.symbol.play_fill'), () => {
+        if (this.selectedEpisode !== null && this.selectedEpisode!.media !== null) {
+          this.showContextMenu = false;
+          getController().playMedia(this.selectedEpisode!.media!, this.selectedEpisode!.feedId, false).catch(() => {});
+        }
+      })
+      this.ctxMenuItem('查看详情', $r('sys.symbol.info_circle'), () => {
+        if (this.selectedEpisode !== null) {
+          this.showContextMenu = false;
+          router.pushUrl({ url: 'pages/EpisodeDetailPage', params: { itemId: this.selectedEpisode!.id } });
+        }
+      })
+      this.ctxMenuItem('跳转至播客', $r('sys.symbol.music_note_list'), () => {
+        if (this.selectedEpisode !== null) {
+          this.showContextMenu = false;
+          router.pushUrl({ url: 'pages/EpisodeListPage', params: { feedId: this.selectedEpisode!.feedId } });
+        }
+      })
+      Blank().height(20)
+    }
+    .width('100%')
+  }
+
+  @Builder
+  ctxMenuItem(label: string, icon: Resource, action: () => void) {
+    Row() {
+      SymbolGlyph(icon).fontSize(20).fontColor(['#333333']).margin({ right: 16 })
+      Text(label).fontSize(16).fontColor('#1A1A1A')
+    }
+    .width('100%').height(52).padding({ left: 20, right: 20 })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => { action(); })
+  }
+
+  @Builder
+  feedContextMenuSheet() {
+    Column() {
+      if (this.selectedFeedEntry !== null) {
+        Text(this.selectedFeedEntry!.feed.getTitle() ?? '')
+          .fontSize(16)
+          .fontWeight(FontWeight.Bold)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .padding({ left: 20, right: 20, top: 16, bottom: 12 })
+      }
+      Divider().strokeWidth(0.5).color('#E8E8E8')
+      this.ctxMenuItem('打开播客', $r('sys.symbol.music_note_list'), () => {
+        if (this.selectedFeedEntry !== null) {
+          this.showFeedContextMenu = false;
+          router.pushUrl({
+            url: 'pages/EpisodeListPage',
+            params: { feedId: this.selectedFeedEntry!.feed.id, feedTitle: this.selectedFeedEntry!.feed.getTitle() ?? '' }
+          });
+        }
+      })
+      this.ctxMenuItem('播客信息', $r('sys.symbol.info_circle'), () => {
+        if (this.selectedFeedEntry !== null) {
+          this.showFeedContextMenu = false;
+          router.pushUrl({
+            url: 'pages/FeedInfoPage',
+            params: { feedId: this.selectedFeedEntry!.feed.id }
+          });
+        }
+      })
+      Blank().height(20)
+    }
+    .width('100%')
   }
 
   private async playOrDownload(item: FeedItem): Promise<void> {
@@ -447,11 +566,19 @@ export struct HomePage {
                 .margin(2)
             }
           }
-          .onClick(() => {
-            router.pushUrl({
-              url: 'pages/EpisodeListPage',
-              params: { feedId: entry.feed.id, feedTitle: entry.feed.getTitle() ?? '' }
+          .onTouch((e: TouchEvent) => {
+            this.lp.onTouch(e, () => {
+              this.selectedFeedEntry = entry;
+              this.showFeedContextMenu = true;
             });
+          })
+          .onClick(() => {
+            if (!this.lp.fired) {
+              router.pushUrl({
+                url: 'pages/EpisodeListPage',
+                params: { feedId: entry.feed.id, feedTitle: entry.feed.getTitle() ?? '' }
+              });
+            }
           })
         }, (entry: FeedWithCount) => entry.feed.id.toString() + '_' + entry.unplayedCount.toString())
       }

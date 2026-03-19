@@ -16,6 +16,12 @@
       },
       {
         "name": "ohos.permission.GET_NETWORK_INFO"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      {
+        "name": "ohos.permission.VIBRATE"
       }
     ],
     "abilities": [
@@ -28,6 +34,10 @@
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        "backgroundModes": [
+          "audioPlayback",
+          "dataTransfer"
+        ],
         "skills": [
           {
             "entities": [
@@ -75,6 +85,12 @@
             "resource": "$profile:form_config"
           }
         ]
+      },
+      {
+        "name": "FeedRefreshWorkAbility",
+        "srcEntry": "./ets/workers/FeedRefreshWorkAbility.ets",
+        "type": "workScheduler",
+        "exported": false
       }
     ]
   }

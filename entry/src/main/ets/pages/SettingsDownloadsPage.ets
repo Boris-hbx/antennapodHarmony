@@ -1,4 +1,6 @@
 import { router, promptAction } from '@kit.ArkUI';
+import { workScheduler } from '@kit.BackgroundTasksKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import {
   isAutoDownloadEnabled, setAutoDownloadEnabled,
   getEpisodeCacheSize, setEpisodeCacheSize,
@@ -164,7 +166,44 @@ struct SettingsDownloadsPage {
   async setInterval(mins: number): Promise<void> {
     this.updateInterval = mins;
     await setUpdateInterval(mins);
+    // Task-032: 重新注册 workScheduler（stopWork → startWork）
+    this.reRegisterWorkScheduler(mins);
     promptAction.showToast({ message: '已保存', duration: 1500 });
+  }
+
+  private reRegisterWorkScheduler(intervalMinutes: number): void {
+    const WORK_ID = 1001;
+    const stopInfo: workScheduler.WorkInfo = {
+      workId: WORK_ID,
+      bundleName: 'com.antennapod.harmony',
+      abilityName: 'FeedRefreshWorkAbility'
+    };
+    try {
+      workScheduler.stopWork(stopInfo);
+    } catch (_e) { /* ignore */ }
+
+    if (intervalMinutes <= 0) {
+      hilog.info(0x0000, 'Settings', 'workScheduler stopped (interval=0)');
+      return;
+    }
+
+    const workInfo: workScheduler.WorkInfo = {
+      workId: WORK_ID,
+      bundleName: 'com.antennapod.harmony',
+      abilityName: 'FeedRefreshWorkAbility',
+      isPersisted: true,
+      isRepeat: true,
+      repeatCycleTime: intervalMinutes * 60 * 1000,
+      networkType: workScheduler.NetworkType.NETWORK_TYPE_ANY
+    };
+
+    try {
+      workScheduler.startWork(workInfo);
+      hilog.info(0x0000, 'Settings', 'workScheduler re-registered: every %{public}d minutes', intervalMinutes);
+    } catch (e) {
+      const msg = (e instanceof Error) ? e.message : String(e);
+      hilog.error(0x0000, 'Settings', 'workScheduler re-registration failed: %{public}s', msg);
+    }
   }
 
   showCachePicker(): void {

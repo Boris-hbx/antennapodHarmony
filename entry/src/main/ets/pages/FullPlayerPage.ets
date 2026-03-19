@@ -16,11 +16,24 @@ import {
 } from 'datastore';
 
 /**
- * 全屏播放器页面 — Task-026: 倍速弹窗 + ⋮ 更多菜单 + 睡眠定时自动启用
+ * 全屏播放器 — 独立路由页面，从 PlaybackController 单例读取当前播放状态
  */
 @Entry
 @Component
 struct FullPlayerPage {
+  build() {
+    Column() {
+      FullPlayerContent({
+        onClose: () => { router.back(); }
+      })
+    }
+  }
+}
+
+@Component
+export struct FullPlayerContent {
+  onClose?: () => void;
+
   @State title: string = '';
   @State feedTitle: string = '';
   @State imageUrl: string = '';
@@ -50,7 +63,6 @@ struct FullPlayerPage {
   @State autoSleepEnabled: boolean = false;
   @State autoSleepStartHour: number = 22;
   @State autoSleepEndHour: number = 7;
-  // showAutoSleepTimeSheet merged into activeSheet/showSheet
 
   private positionCallback: (data: PlaybackPositionData) => void = (data: PlaybackPositionData) => {
     if (!this.isSeeking) {
@@ -67,23 +79,33 @@ struct FullPlayerPage {
   };
 
   aboutToAppear(): void {
-    const params = router.getParams() as Record<string, Object>;
-    if (params !== null && params !== undefined) {
-      this.title = params['title'] as string ?? '';
-      this.feedTitle = params['feedTitle'] as string ?? '';
-      this.imageUrl = params['imageUrl'] as string ?? '';
-      this.positionMs = params['position'] as number ?? 0;
-      this.durationMs = params['duration'] as number ?? 0;
-      this.isPlaying = params['isPlaying'] as boolean ?? false;
-      this.isFavorite = params['isFavorite'] as boolean ?? false;
-      this.pubDateStr = params['pubDate'] as string ?? '';
-      this.itemLink = params['itemLink'] as string ?? '';
-      this.mediaUrl = params['mediaUrl'] as string ?? '';
-      this.currentItemId = params['itemId'] as number ?? 0;
-      this.feedId = params['feedId'] as number ?? 0;
+    // Task-034: 直接从 PlaybackController 读取当前播放状态，不再依赖 router params
+    const ctrl = getController();
+    const item = ctrl.getCurrentItem();
+    const feed = ctrl.getCurrentFeed();
+    const media = ctrl.getCurrentMedia();
+    if (item !== null) {
+      this.title = item.title ?? '';
+      this.currentItemId = item.id;
+      this.isFavorite = item.isFavorite();
+      this.imageUrl = item.getImageLocation() ?? (feed !== null ? (feed.imageUrl ?? '') : '');
+      this.itemLink = item.link ?? '';
+      this.feedId = item.feedId;
+      if (item.pubDate !== null) {
+        const d = item.pubDate;
+        this.pubDateStr = `${d.getFullYear()}-${(d.getMonth() + 1).toString().padStart(2, '0')}-${d.getDate().toString().padStart(2, '0')}`;
+      }
     }
+    if (feed !== null) {
+      this.feedTitle = feed.getTitle() ?? '';
+    }
+    if (media !== null) {
+      this.mediaUrl = media.downloadUrl ?? '';
+    }
+    this.positionMs = ctrl.getPosition();
+    this.durationMs = ctrl.getDuration();
+    this.isPlaying = ctrl.isPlaying();
     this.currentSpeed = getPlaybackSpeed();
-    this.isPlaying = getController().isPlaying();
     this.autoSleepEnabled = isSleepTimerAutoEnable();
     this.autoSleepStartHour = getSleepTimerAutoEnableFrom();
     this.autoSleepEndHour = getSleepTimerAutoEnableTo();
@@ -108,7 +130,7 @@ struct FullPlayerPage {
             .fontColor(['#000000'])
         }
         .width(48).height(56)
-        .onClick(() => { router.back(); })
+        .onClick(() => { this.onClose?.(); })
 
         Blank()
 
